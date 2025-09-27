@@ -13,6 +13,7 @@ Zero Allocation Text/Structured Logger (ZLogger) for .NET and Godot
 
 ## Features
 
++ Based on ePlugin Framework (![Github](https://github.com/enaweg/godot-epluginframework)) for simplicity
 + ZLogger (![Github](https://github.com/Cysharp/ZLogger)) integration with Godot
 
 ## Contribute
