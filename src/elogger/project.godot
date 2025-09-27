@@ -23,6 +23,10 @@ project/assembly_name="ELogger"
 
 enabled=PackedStringArray("res://addons/eLogger/plugin.cfg", "res://addons/ePlugin/plugin.cfg", "res://addons/gdUnit4/plugin.cfg")
 
+[gdunit4]
+
+settings/test/test_lookup_folder="Tests"
+
 [rendering]
 
 renderer/rendering_method="gl_compatibility"
