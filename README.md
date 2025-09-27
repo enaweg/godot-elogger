@@ -1,5 +1,7 @@
 # eLogger
-Zero Allocation Text/Structured Logger for .NET and Godot
+Zero Allocation Text/Structured Logger (ZLogger) for .NET and Godot
+
+![ZLogger on Github](https://github.com/Cysharp/ZLogger)
 
 ![Godot 4.3](https://img.shields.io/badge/Godot-v4.3-202020?logo=godot-engine&logoColor=blue&color=darkgreen&labelColor=202020)
 ![Godot 4.4](https://img.shields.io/badge/Godot-v4.4-202020?logo=godot-engine&logoColor=blue&color=darkgreen&labelColor=202020)
