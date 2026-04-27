@@ -7,7 +7,7 @@ using Godot;
 
 namespace Enaweg.Plugin.Internal.Dotnet;
 
-internal sealed class DotnetCli9(ILogger logger) : DotnetCliBase(logger), IDotnetCli
+internal sealed class DotnetCli9(EPluginPlugin ePlugin, ILogger? logger) : DotnetCliBase(ePlugin, logger), IDotnetCli
 {
     private const string CmdDotNet = "dotnet";
 
@@ -27,13 +27,13 @@ internal sealed class DotnetCli9(ILogger logger) : DotnetCliBase(logger), IDotne
 
         Execute([
             "sln",
-            SolutionPath,
+            $"\"{SolutionPath}\"",
             "remove",
             Path.Combine(pathToSolution, projectPath)
         ]);
     }
 
-    public override void AddProjectToSolution(string projectPath, string virtualFolderName = null)
+    public override void AddProjectToSolution(string projectPath, string? virtualFolderName = null)
     {
         var pathToSolution = ProjectSettings.GlobalizePath("res://");
 
@@ -41,7 +41,7 @@ internal sealed class DotnetCli9(ILogger logger) : DotnetCliBase(logger), IDotne
         {
             Execute([
                 "sln",
-                SolutionPath,
+                $"\"{SolutionPath}\"",
                 "add",
                 Path.Combine(pathToSolution, projectPath)
             ]);
@@ -50,7 +50,7 @@ internal sealed class DotnetCli9(ILogger logger) : DotnetCliBase(logger), IDotne
         {
             Execute([
                 "sln",
-                SolutionPath,
+                $"\"{SolutionPath}\"",
                 "add",
                 "-s", virtualFolderName,
                 Path.Combine(pathToSolution, projectPath)
@@ -58,14 +58,14 @@ internal sealed class DotnetCli9(ILogger logger) : DotnetCliBase(logger), IDotne
         }
     }
 
-    public override bool AddNugetToProject(string nugetName, string version = null, string source = null,
+    public override bool AddNugetToProject(string nugetName, string? version = null, string? source = null,
         bool prerelease = false)
     {
         var globalSourcePath = ProjectSettings.GlobalizePath(source);
         var args = new List<string>();
 
         args.Add("add");
-        args.Add(GodotProjectPath);
+        args.Add($"\"{GodotProjectPath}\"");
         args.Add("package");
         args.Add(nugetName);
         if (version is not null)
@@ -108,7 +108,7 @@ internal sealed class DotnetCli9(ILogger logger) : DotnetCliBase(logger), IDotne
     {
         Execute([
             "remove",
-            GodotProjectPath,
+            $"\"{GodotProjectPath}\"",
             "package",
             nugetName
         ]);
@@ -118,7 +118,7 @@ internal sealed class DotnetCli9(ILogger logger) : DotnetCliBase(logger), IDotne
     {
         Execute([
             "add",
-            GodotProjectPath,
+            $"\"{GodotProjectPath}\"",
             "reference",
             projectReference,
         ]);
@@ -128,7 +128,7 @@ internal sealed class DotnetCli9(ILogger logger) : DotnetCliBase(logger), IDotne
     {
         Execute([
             "remove",
-            GodotProjectPath,
+            $"\"{GodotProjectPath}\"",
             "reference",
             projectReference,
         ]);

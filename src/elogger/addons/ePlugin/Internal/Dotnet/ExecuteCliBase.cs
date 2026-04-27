@@ -1,5 +1,6 @@
 ﻿#if TOOLS
 using System;
+using System.IO;
 using System.Linq;
 using Enaweg.Plugin.Logging;
 using Godot;
@@ -9,15 +10,28 @@ namespace Enaweg.Plugin.Internal.Dotnet;
 
 public abstract class ExecuteCliBase
 {
-    protected (int, string[]) ExecuteCall(ILogger logger, string cmd, string[] args)
+    protected EPluginPlugin EPlugin { get; }
+
+    protected ExecuteCliBase(EPluginPlugin ePlugin)
     {
-        var pathToSolution = ProjectSettings.GlobalizePath("res://");
+        EPlugin = ePlugin;
+    }
+
+    protected (int, string[]) ExecuteCall(ILogger? logger, string cmd, string[] args)
+    {
+        var pathToSolution = Path.GetFullPath(ProjectSettings.GlobalizePath("res://"));
 
         try
         {
+            var finalArgs = args.SelectMany(a => a.Split(' ')).ToArray();
             var result = new Array();
-            logger.Log($"Executing: {cmd} {string.Join(" ", args).Replace(pathToSolution, "<project>/")}");
-            var exitVal = OS.Execute(cmd, args, result, true, false);
+            if (EPlugin.EnableDebugLogging)
+            {
+                logger?.Log(
+                    $"Executing: {cmd} {string.Join(" ", finalArgs).Replace(pathToSolution, $"<project>{Path.DirectorySeparatorChar}")}");
+            }
+
+            var exitVal = OS.Execute(cmd, finalArgs, result, true, false);
 
             var final = result.Select(e => e.ToString()).ToArray();
             result.Dispose();
@@ -26,7 +40,7 @@ public abstract class ExecuteCliBase
         }
         catch (Exception ex)
         {
-            logger.Error(ex.Message);
+            logger?.Error(ex.Message);
         }
 
         return (-1, []);

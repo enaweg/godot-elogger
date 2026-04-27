@@ -10,7 +10,7 @@ internal sealed class DotnetCli : ExecuteCliBase, IDotnet
 {
     private const string CmdDotNet = "dotnet";
 
-    private ILogger _logger;
+    private ILogger? _logger;
 
     private string? _dotnetVersion = null;
     private bool? _isDotnetAvailable = null;
@@ -74,39 +74,43 @@ internal sealed class DotnetCli : ExecuteCliBase, IDotnet
         get => _call;
     }
 
-    public DotnetCli(ILogger logger)
+    public DotnetCli(EPluginPlugin ePlugin, ILogger? logger) : base(ePlugin)
     {
         _logger = logger;
 
+        if (!IsDotnetAvailable)
+        {
+            _logger?.Error(
+                "The dotnet command line tool could not be executed, make sure it is installed and accessible.");
+        }
 
         if (Is10OrLater)
         {
-            _call = new DotnetCli10(_logger);
+            _call = new DotnetCli10(ePlugin, _logger);
         }
         else
         {
-            _call = new DotnetCli9(_logger);
-        }
-
-
-        if (!IsDotnetAvailable)
-        {
-            _logger.Error(
-                "The dotnet command line tool could not be executed, make sure it is installed and accessible.");
+            _call = new DotnetCli9(ePlugin, _logger);
         }
     }
 
-    public void UseLogger(ILogger logger)
+    public void UseLogger(ILogger? logger)
     {
         _logger = logger;
         _call.UseLogger(logger);
     }
-    
+
     private bool IsDotnetCliAvailable()
     {
         try
         {
-            var result = ExecuteCall(_logger, CmdDotNet, ["--version"]);
+            var cmdName = "which"; // works on linux and mac
+            if (OS.GetName() == "Windows")
+            {
+                cmdName = "where";
+            }
+
+            var result = ExecuteCall(_logger, cmdName, [CmdDotNet]);
             if (result.Item1 >= 0)
             {
                 return true;
@@ -114,7 +118,7 @@ internal sealed class DotnetCli : ExecuteCliBase, IDotnet
         }
         catch (Exception ex)
         {
-            _logger.Error(ex.Message);
+            _logger?.Error(ex.Message);
         }
 
         return false;
@@ -129,6 +133,7 @@ internal sealed class DotnetCli : ExecuteCliBase, IDotnet
             return result.Item2[0];
         }
 
+        
         throw new Exception("Dotnet could not be executed.");
     }
 

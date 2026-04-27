@@ -6,7 +6,7 @@ using Godot;
 
 namespace Enaweg.Plugin.Internal.Dotnet;
 
-internal sealed class DotnetCli10(ILogger logger) : DotnetCliBase(logger), IDotnetCli
+internal sealed class DotnetCli10(EPluginPlugin ePlugin, ILogger? logger) : DotnetCliBase(ePlugin, logger), IDotnetCli
 {
     private const string CmdDotNet = "dotnet";
 
@@ -27,13 +27,13 @@ internal sealed class DotnetCli10(ILogger logger) : DotnetCliBase(logger), IDotn
         Execute(null, null,
         [
             "sln",
-            SolutionPath,
+            $"\"{SolutionPath}\"",
             "remove",
             Path.Combine(pathToSolution, projectPath)
         ]);
     }
 
-    public override void AddProjectToSolution(string projectPath, string virtualFolderName = null)
+    public override void AddProjectToSolution(string projectPath, string? virtualFolderName = null)
     {
         var pathToSolution = ProjectSettings.GlobalizePath("res://");
 
@@ -41,7 +41,7 @@ internal sealed class DotnetCli10(ILogger logger) : DotnetCliBase(logger), IDotn
         {
             Execute(null, null, [
                 "sln",
-                SolutionPath,
+                $"\"{SolutionPath}\"",
                 "add",
                 Path.Combine(pathToSolution, projectPath)
             ]);
@@ -50,7 +50,7 @@ internal sealed class DotnetCli10(ILogger logger) : DotnetCliBase(logger), IDotn
         {
             Execute(null, null, [
                 "sln",
-                SolutionPath,
+                $"\"{SolutionPath}\"",
                 "add",
                 "-s", virtualFolderName,
                 Path.Combine(pathToSolution, projectPath)
@@ -58,7 +58,7 @@ internal sealed class DotnetCli10(ILogger logger) : DotnetCliBase(logger), IDotn
         }
     }
 
-    public override bool AddNugetToProject(string nugetName, string version = null, string source = null,
+    public override bool AddNugetToProject(string nugetName, string? version = null, string? source = null,
         bool prerelease = false)
     {
         var globalSourcePath = ProjectSettings.GlobalizePath(source);
@@ -92,11 +92,11 @@ internal sealed class DotnetCli10(ILogger logger) : DotnetCliBase(logger), IDotn
         {
             if (version is not null)
             {
-                Logger.Error($"Installing {nugetName} v{version} failed!");
+                Logger?.Error($"Installing {nugetName} v{version} failed!");
             }
             else
             {
-                Logger.Error($"Installing {nugetName} failed!");
+                Logger?.Error($"Installing {nugetName} failed!");
             }
         }
 
@@ -108,7 +108,7 @@ internal sealed class DotnetCli10(ILogger logger) : DotnetCliBase(logger), IDotn
         Execute("package", "remove", [
             nugetName,
             "--project",
-            GodotProjectPath
+            $"\"{GodotProjectPath}\""
         ]);
     }
 
@@ -117,7 +117,7 @@ internal sealed class DotnetCli10(ILogger logger) : DotnetCliBase(logger), IDotn
         Execute("add", null,
         [
             "add",
-            GodotProjectPath,
+            $"\"{GodotProjectPath}\"",
             "reference",
             projectReference,
         ]);
@@ -128,7 +128,7 @@ internal sealed class DotnetCli10(ILogger logger) : DotnetCliBase(logger), IDotn
         Execute("remove", null,
         [
             "remove",
-            GodotProjectPath,
+            $"\"{GodotProjectPath}\"",
             "reference",
             projectReference,
         ]);
@@ -139,7 +139,7 @@ internal sealed class DotnetCli10(ILogger logger) : DotnetCliBase(logger), IDotn
         return ExecuteCall(Logger, command, args);
     }
 
-    private (int, string[]) Execute(string noun, string verb, string[] args)
+    private (int, string[]) Execute(string? noun, string? verb, string[] args)
     {
         var allArgs = new List<string>();
         if (noun is not null)

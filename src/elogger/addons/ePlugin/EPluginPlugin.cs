@@ -6,28 +6,27 @@ using Godot;
 namespace Enaweg.Plugin;
 
 [Tool]
-public partial class EPluginPlugin : EEditorPluginBase
+public sealed partial class EPluginPlugin : EditorPlugin
 {
-    protected override ILogger InitializeLogging()
+    public bool EnableDebugLogging => false;
+
+    private ILogger? _logger = null;
+
+    public ILogger Logger
     {
-        return new GodotConsoleLogger(PluginSlug);
+        get
+        {
+            _logger ??= new GodotConsoleLogger(this.GetPluginSlug());
+
+            return _logger;
+        }
+        set => _logger = value;
     }
 
     public override void _EnterTree()
     {
         base._EnterTree();
-        EGlobal.Instance.StartProcessing(this);
-    }
-
-    public override void _Ready()
-    {
-        base._Ready();
-        EGlobal.Instance.StartProcessing(this);
-    }
-
-    public override void _EnablePlugin()
-    {
-        base._EnablePlugin();
+        InitializeInternals();
     }
 
     public override void _DisablePlugin()
@@ -36,10 +35,23 @@ public partial class EPluginPlugin : EEditorPluginBase
         base._DisablePlugin();
     }
 
-    public override void _ExitTree()
+    public override void _Process(double delta)
     {
-        EGlobal.Instance.StopProcessing();
-        base._ExitTree();
+        base._Process(delta);
+
+        if (!EGlobal.Instance.IsValid())
+        {
+            // after an assembly reload the EnterTree, EnablePlugin and Ready are not triggered anymore but all C#
+            // state is lost. This will reinitialize the ePlugin Framework.
+            InitializeInternals();
+        }
+
+        EGlobal.Instance.GlobalProcessor();
+    }
+
+    private void InitializeInternals()
+    {
+        EGlobal.Instance.Initialize(this, new GenericLoggerFactory(category => new GodotConsoleLogger(category)));
     }
 }
 #endif

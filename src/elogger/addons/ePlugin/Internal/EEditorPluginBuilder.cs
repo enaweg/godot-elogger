@@ -1,8 +1,9 @@
-﻿using Enaweg.Plugin;
-using GContainer.addons.ePlugin.Internal;
+﻿#if TOOLS
+using Godot;
 
-namespace GContainer.addons.ePlugin;
+namespace Enaweg.Plugin.Internal;
 
+[Tool]
 internal sealed class EEditorPluginBuilder : IEEditorPluginBuilder
 {
     public static EEditorPluginBuilder Create()
@@ -64,3 +65,4 @@ internal sealed class EEditorPluginBuilder : IEEditorPluginBuilder
         return this;
     }
 }
+#endif
