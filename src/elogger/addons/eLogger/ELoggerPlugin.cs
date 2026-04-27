@@ -1,25 +1,26 @@
 #if TOOLS
 using Godot;
 using Enaweg.Plugin;
-using Enaweg.Plugin.Logging;
 
 namespace Enaweg.Logger;
 
 [Tool]
-public partial class ELoggerPlugin : EEditorPlugin
+public partial class ELoggerPlugin : EditorPlugin, IEEditorPlugin
 {
-    protected override ILogger InitializeLogging()
-    {
-        return new GodotConsoleLogger(PluginSlug);
-    }
+    public EditorPlugin GodotPlugin => this;
 
-    internal override void Bootstrap(IEEditorPluginBuilder builder)
+    public void Bootstrap(IEEditorPluginBuilder builder)
     {
-        var srcDirectory = $"{PluginDirectory}/.src";
+        var srcDirectory = $"{this.GetPluginDirectory()}/.src";
 
         builder
             .AddNuget("ZLogger")
+            .AddNuget("ZString")
             .AddDirectory(srcDirectory);
+    }
+
+    public void Reinitialize()
+    {
     }
 }
 

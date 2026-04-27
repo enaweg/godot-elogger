@@ -13,8 +13,7 @@ public sealed class GodotLogProcessor : IAsyncLogProcessor
     [ThreadStatic] static ArrayBufferWriter<byte>? bufferWriter;
 
     readonly IZLoggerFormatter formatter;
-
-
+    
     public GodotLogProcessor(ZLoggerOptions options)
     {
         formatter = options.CreateFormatter();
