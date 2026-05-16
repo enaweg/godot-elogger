@@ -113,8 +113,7 @@ public class ZLoggerGodotDebugLoggerProvider : ILoggerProvider, ISupportExternal
         if (options.EPluginIntegration)
         {
 #if TOOLS
-            
-            EGlobal.Instance.Initialize(EGlobal.Instance, new EPluginLoggerFactory(this));
+            EGlobal.Instance.SwitchLogging(new EPluginLoggerFactory(this));
 #endif
         }
     }

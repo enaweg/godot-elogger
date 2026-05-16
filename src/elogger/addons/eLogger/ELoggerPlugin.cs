@@ -7,9 +7,7 @@ namespace Enaweg.Logger;
 [Tool]
 public partial class ELoggerPlugin : EditorPlugin, IEEditorPlugin
 {
-    public EditorPlugin GodotPlugin => this;
-
-    public void Bootstrap(IEEditorPluginBuilder builder)
+    public void CreateRecipe(IEEditorPluginBuilder builder)
     {
         var srcDirectory = $"{this.GetPluginDirectory()}/.src";
 
@@ -19,8 +17,16 @@ public partial class ELoggerPlugin : EditorPlugin, IEEditorPlugin
             .AddDirectory(srcDirectory);
     }
 
-    public void Reinitialize()
+    public override void _EnablePlugin()
     {
+        base._EnablePlugin();
+        this.EnableEPlugin();
+    }
+
+    public override void _DisablePlugin()
+    {
+        this.DisableEPlugin();
+        base._DisablePlugin();
     }
 }
 
