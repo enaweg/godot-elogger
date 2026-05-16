@@ -23,18 +23,6 @@ public sealed partial class EPluginPlugin : EditorPlugin
         set => _logger = value;
     }
 
-    public override void _EnterTree()
-    {
-        base._EnterTree();
-        InitializeInternals();
-    }
-
-    public override void _DisablePlugin()
-    {
-        EGlobal.Instance.DeactivateAllEEditorPlugins();
-        base._DisablePlugin();
-    }
-
     public override void _Process(double delta)
     {
         base._Process(delta);
@@ -45,10 +33,8 @@ public sealed partial class EPluginPlugin : EditorPlugin
             // state is lost. This will reinitialize the ePlugin Framework.
             InitializeInternals();
         }
-
-        EGlobal.Instance.GlobalProcessor();
     }
-
+    
     private void InitializeInternals()
     {
         EGlobal.Instance.Initialize(this, new GenericLoggerFactory(category => new GodotConsoleLogger(category)));
