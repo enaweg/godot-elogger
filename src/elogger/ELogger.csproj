@@ -12,5 +12,6 @@
     <PackageReference Include="gdUnit4.api" Version="5.0.0" />
     <PackageReference Include="gdUnit4.test.adapter" Version="3.0.0" />
     <PackageReference Include="ZLogger" Version="2.5.10" />
+    <PackageReference Include="ZString" Version="2.6.0" />
   </ItemGroup>
 </Project>

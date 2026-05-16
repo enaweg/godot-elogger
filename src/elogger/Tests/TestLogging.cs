@@ -27,7 +27,7 @@ public sealed class TestLogging
         var name = "John";
         var age = 33;
 
-// Use **Z**Log method and string interpolation to log message
+        // Use **Z**Log method and string interpolation to log message
         logger.ZLogInformation($"Hello my name is {name}, {age} years old.");
     }
 }
