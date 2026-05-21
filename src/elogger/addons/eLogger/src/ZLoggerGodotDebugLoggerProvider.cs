@@ -5,6 +5,7 @@ using System.Text;
 using System.Threading.Tasks;
 using Enaweg.Plugin.Internal;
 using Godot;
+using Godot.Collections;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using ZLogger;
@@ -98,6 +99,44 @@ public class GodotDebugLogProcessor : IAsyncLogProcessor
     }
 }
 
+internal sealed partial class GodotOSLogger(ILogger logger) : Godot.Logger
+{
+    public override void _LogError(string function, string file, int line, string code, string rationale,
+        bool editorNotify, int errorType, Array<ScriptBacktrace> scriptBacktraces)
+    {
+        base._LogError(function, file, line, code, rationale, editorNotify, errorType, scriptBacktraces);
+        switch (errorType)
+        {
+            case (int)ErrorType.Error:
+                logger.ZLogError($"{rationale}", null, function, file, line);
+                break;
+            case (int)ErrorType.Script:
+                logger.ZLogError($"{rationale}", null, function, file, line);
+                break;
+            case (int)ErrorType.Shader:
+                logger.ZLogError($"{rationale}", null, function, file, line);
+                break;
+            case (int)ErrorType.Warning:
+                logger.ZLogWarning($"{rationale}", null, function, file, line);
+                break;
+        }
+    }
+
+    public override void _LogMessage(string message, bool error)
+    {
+        base._LogMessage(message, error);
+
+        if (error)
+        {
+            logger.ZLogError($"{message}");
+        }
+        else
+        {
+            logger.ZLogInformation($"{message}");
+        }
+    }
+}
+
 [ProviderAlias("ZLoggerGodotDebug")]
 public class ZLoggerGodotDebugLoggerProvider : ILoggerProvider, ISupportExternalScope, IAsyncDisposable
 {
@@ -109,6 +148,8 @@ public class ZLoggerGodotDebugLoggerProvider : ILoggerProvider, ISupportExternal
     {
         this.options = options;
         this.processor = new GodotDebugLogProcessor(options);
+
+        OS.AddLogger(new GodotOSLogger(CreateLogger("OSLogger")));
 
         if (options.EPluginIntegration)
         {
