@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using Enaweg.Plugin.Internal.Dotnet;
 using Enaweg.Plugin.Logging;
 using Godot;
@@ -36,6 +37,8 @@ internal sealed class EGlobal
 
     private readonly Stack<PluginContext> _toCheckEnable = new();
     private readonly Stack<PluginContext> _toCheckDisable = new();
+    private readonly Queue<IInitialize> _toInitialize = new();
+
 
     private EGlobal()
     {
@@ -55,6 +58,16 @@ internal sealed class EGlobal
         CliService = new DotnetVersionManager(plugin.Logger, plugin.EnableDebugLogging);
 
         ReloadContexts(_loggerFactory, false);
+
+        if (_toCheckEnable.Any())
+        {
+            foreach (var pluginContext in _toCheckEnable)
+            {
+                EnableEPlugin(pluginContext, false);
+            }
+
+            RefreshEditor();
+        }
     }
 
     /// <summary>
@@ -96,6 +109,11 @@ internal sealed class EGlobal
             var pluginLogger = _loggerFactory?.CreateLogger(pluginBase.GetType().FullName ?? "UNKNOWN");
             context = new PluginContext(ePlugin, pluginBase, pluginLogger);
             _contexts.Add(context);
+
+            if (context.PluginBase is IInitialize initialize)
+            {
+                initialize.Initialize(_ePluginContext);
+            }
         }
 
         return context;
@@ -131,8 +149,8 @@ internal sealed class EGlobal
 
         if (!IsValid())
         {
-            EditorInterface.Singleton.SetPluginEnabled(context.Slug, false);
             _toCheckEnable.Push(context);
+            return;
         }
 
         if (context.State == EEditorPluginState.Activated)
@@ -174,7 +192,8 @@ internal sealed class EGlobal
                     return;
                 }
 
-                var dependencyVersion = dependencyContext.Version;
+                var dependencyVersion = dependencyContext.Metadata?.Version ?? "0.0";
+
                 if (MatchesVersion(dependencyVersion, dependency.Version, context.Logger))
                 {
                     if (context.State is EEditorPluginState.Deactivated or EEditorPluginState.Error)
@@ -240,7 +259,7 @@ internal sealed class EGlobal
     {
         foreach (var nuget in recipe.Nugets)
         {
-            if (!context.Cli.AddNugetToProject(nuget.Name, nuget.Version, nuget.Source))
+            if (!context.Cli!.AddNugetToProject(nuget.Name, nuget.Version, nuget.Source))
             {
                 context.FailedTries = uint.MaxValue;
                 return;
@@ -249,11 +268,11 @@ internal sealed class EGlobal
 
         foreach (var project in recipe.Projects)
         {
-            context.Cli.AddProjectToSolution(project.Path, project.FolderName);
+            context.Cli!.AddProjectToSolution(project.Path, project.FolderName);
 
             if (project.Reference)
             {
-                context.Cli.AddProjectReference(project.Path);
+                context.Cli!.AddProjectReference(project.Path);
             }
         }
 
@@ -382,13 +401,13 @@ internal sealed class EGlobal
 
         foreach (var project in recipe.Projects)
         {
-            context.Cli.RemoveProjectReference(project.Path);
-            context.Cli.RemoveProjectFromSolution(project.Path);
+            context.Cli!.RemoveProjectReference(project.Path);
+            context.Cli!.RemoveProjectFromSolution(project.Path);
         }
 
         foreach (var nuget in recipe.Nugets)
         {
-            context.Cli.RemoveNugetFromProject(nuget.Name);
+            context.Cli!.RemoveNugetFromProject(nuget.Name);
         }
     }
 
@@ -462,7 +481,16 @@ internal sealed class EGlobal
                     continue;
                 }
 
-                AddOrUpdatePluginContext(pluginBase as IEEditorPlugin, pluginBase, changeTriggered);
+                var context = GetOrCreateContext(pluginBase);
+
+                context.State = changeTriggered
+                    ?
+                    // was a change to plugins, so this is a new plugin need to bootstrap.
+                    EEditorPluginState.Created
+                    :
+                    // initial start or assembly reload, nothing need to be done as installation already happened
+                    EEditorPluginState.Activated;
+
                 _ePluginContext.Logger.Log($"  - plugin {pluginBase.GetPluginSlug()} ({pluginBase.GetName()})");
             }
         }
@@ -470,59 +498,24 @@ internal sealed class EGlobal
         _ePluginContext.Logger.Log(
             $"Found {_contexts.Count(p => p.State is EEditorPluginState.Activated)} active plugins.");
 
-        // initialize plugins
-        var initializers = _contexts.Select(c => c.PluginBase).OfType<IInitialize>().ToArray();
-        if (_ePluginContext.EnableDebugLogging && initializers.Any())
-        {
-            _ePluginContext.Logger.Log($"Calling Initializers:");
-        }
-
-        foreach (var initializer in initializers)
-        {
-            try
-            {
-                if (_ePluginContext.EnableDebugLogging)
-                {
-                    _ePluginContext.Logger.Log($" - Initializing {initializer.GetType().FullName}");
-                }
-
-                initializer.Initialize(_ePluginContext);
-            }
-            catch (Exception ex)
-            {
-                _ePluginContext.Logger.Error($"Error initializing {initializer.GetType().FullName}: {ex}");
-            }
-        }
+        ExecuteInitializers();
     }
 
-    private void AddOrUpdatePluginContext(IEEditorPlugin? editorPlugin, EditorPlugin pluginBase, bool changeTriggered)
+    private void ExecuteInitializers()
     {
-        var context = _contexts.FirstOrDefault(c => c.PluginBase == pluginBase);
-        if (context is null)
+        if (!IsValid())
         {
-            var pluginLogger = _loggerFactory?.CreateLogger(pluginBase.GetType().FullName ?? "UNKNOWN");
-            if (changeTriggered)
-            {
-                // was a change to plugins, so this is a new plugin need to bootstrap.
-                context = new PluginContext(editorPlugin, pluginBase, pluginLogger)
-                {
-                    State = EEditorPluginState.Created,
-                };
-            }
-            else
-            {
-                // initial start or assembly reload, nothing need to be done as installation already happened
-                context = new PluginContext(editorPlugin, pluginBase, pluginLogger)
-                {
-                    State = EEditorPluginState.Activated
-                };
-            }
+            return;
+        }
 
-            _contexts.Add(context);
+        while (_toInitialize.Count > 0)
+        {
+            var initializer = _toInitialize.Dequeue();
+            initializer.Initialize(_ePluginContext);
         }
     }
 
-    private bool MatchesVersion(string givenVersion, string condition, ILogger logger)
+    private bool MatchesVersion(string givenVersion, string condition, ILogger? logger)
     {
         if (string.IsNullOrWhiteSpace(givenVersion) || string.IsNullOrWhiteSpace(condition))
             return false;
@@ -536,7 +529,7 @@ internal sealed class EGlobal
 
         if (!Version.TryParse(givenVersion, out var version))
         {
-            logger.Warn(
+            logger?.Warn(
                 $"Dependency version is in wrong format! (was: {givenVersion} needed: [major].[minor].[patch])");
             return false;
         }
@@ -546,7 +539,7 @@ internal sealed class EGlobal
             var conditionVersionStr = condition.AsSpan()[1..];
             if (!Version.TryParse(conditionVersionStr, out var checkVersion))
             {
-                logger.Warn(
+                logger?.Warn(
                     $"Dependency version is in wrong format! (was: {givenVersion} needed: >[major].[minor].[patch])");
                 return false;
             }
@@ -557,12 +550,22 @@ internal sealed class EGlobal
         {
             if (!Version.TryParse(condition, out var checkVersion))
             {
-                logger.Warn(
+                logger?.Warn(
                     $"Dependency version is in wrong format! (was: {givenVersion} needed: [major].[minor].[patch])");
                 return false;
             }
 
             return version == checkVersion;
+        }
+    }
+
+    public void AddInitializer(IInitialize initializer)
+    {
+        _toInitialize.Enqueue(initializer);
+
+        if (_ePluginContext?.EnableDebugLogging ?? false)
+        {
+            _ePluginContext.Logger?.Log($"Initializer {initializer.GetType().FullName} enqueued.");
         }
     }
 }
