@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 eLogger is a [ZLogger](https://github.com/Cysharp/ZLogger) (zero-allocation structured logging) integration for Godot 4.x using C#/.NET. It ships as a Godot editor plugin that depends on the ePlugin framework (also vendored here).
 
-Target runtimes: Godot 4.4–4.7, .NET 8 and .NET 10.
+Target runtimes: Godot 4.4–4.7, .NET 8 and .NET 10. The dev project itself pins `Godot.NET.Sdk/4.6.3` and targets `net8.0` (see `src/elogger/ELogger.csproj`).
 
 ## Commands
 
@@ -30,14 +30,18 @@ export GODOT_BIN=/path/to/godot
 ./addons/gdUnit4/runtest.sh --godot_binary /path/to/godot -s res://Tests/TestLogging.cs
 ```
 
+Tests live in `src/elogger/Tests/` — gdUnit4 discovers them there via `[gdunit4] settings/test/test_lookup_folder` in `project.godot`. C# test support comes from the `gdUnit4.api` / `gdUnit4.test.adapter` NuGet packages plus the vendored gdUnit4 addon (v6.0.0).
+
 ## Architecture
 
 ### Two-plugin layout
 
 `src/elogger/addons/` contains two distinct plugins that are always co-deployed:
 
-- **`ePlugin/`** — the plugin lifecycle framework. It is the dependency; it has no knowledge of ZLogger.
+- **`ePlugin/`** — the plugin lifecycle framework (vendored at v0.5.4, upstream: [godot-epluginframework](https://github.com/enaweg/godot-epluginframework)). It is the dependency; it has no knowledge of ZLogger.
 - **`eLogger/`** — the ZLogger-to-Godot bridge. It depends on ePlugin.
+
+Godot 4.4+ generates a `.uid` sidecar file next to each script/resource; leave them alone and let Godot manage them.
 
 ### ePlugin framework (`addons/ePlugin/`)
 
@@ -58,7 +62,7 @@ ePlugin has its own lightweight logging interfaces (`Enaweg.Plugin.Logging.ILogg
 
 ### eLogger plugin (`addons/eLogger/`)
 
-`ELoggerPlugin.CreateRecipe` registers the `ZLogger` and `ZString` NuGet packages and exposes the `.src` directory (which contains the runtime source files).
+`ELoggerPlugin.CreateRecipe` registers the `ZLogger` and `ZString` NuGet packages and exposes the `.src` directory (which contains the runtime source files). Because the plugin is enabled in this dev project, those packages (`ZLogger` 2.5.10, `ZString` 2.6.0) appear in `ELogger.csproj` and the directory exists as `src/` on disk.
 
 **ZLogger → Godot routing** is handled by two `IAsyncLogProcessor` implementations:
 
