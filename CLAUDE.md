@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 eLogger is a [ZLogger](https://github.com/Cysharp/ZLogger) (zero-allocation structured logging) integration for Godot 4.x using C#/.NET. It ships as a Godot editor plugin that depends on the ePlugin framework (also vendored here).
 
-Target runtimes: Godot 4.4–4.7, .NET 8 and .NET 10. The dev project itself pins `Godot.NET.Sdk/4.6.3` and targets `net8.0` (see `src/elogger/ELogger.csproj`).
+Target runtimes: Godot 4.x, .NET 8+. The dev project itself pins the latest godot release (see `src/elogger/ELogger.csproj`).
 
 ## Commands
 
