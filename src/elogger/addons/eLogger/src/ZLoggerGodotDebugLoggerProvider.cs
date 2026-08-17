@@ -2,6 +2,7 @@ using System;
 using System.Buffers;
 using System.Diagnostics;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using Enaweg.Plugin.Internal;
 using Godot;
@@ -41,6 +42,9 @@ public static class ZLoggerGodotExtensions
 public class GodotDebugLogProcessor : IAsyncLogProcessor
 {
     [ThreadStatic] static ArrayBufferWriter<byte>? bufferWriter;
+    [ThreadStatic] static bool isWritingToGodot;
+
+    internal static bool IsWritingToGodot => isWritingToGodot;
 
     readonly ZLoggerGodotDebugOptions options;
     readonly IZLoggerFormatter formatter;
@@ -65,22 +69,31 @@ public class GodotDebugLogProcessor : IAsyncLogProcessor
 
             if (log.LogInfo.Exception is not null && options.PrettyStacktrace)
             {
-                var stacktrace = new StackTrace(5, true);
+                var stacktrace = new StackTrace(log.LogInfo.Exception, true);
                 msg =
                     $"{msg}{Environment.NewLine}{DiagnosticsHelper.CleanupStackTrace(stacktrace)}{Environment.NewLine}---";
             }
 
-            switch (log.LogInfo.LogLevel)
+            var wasWritingToGodot = isWritingToGodot;
+            isWritingToGodot = true;
+            try
             {
-                case LogLevel.Error or LogLevel.Critical:
-                    GD.PushError(context is not null ? $"(#{context.GetInstanceId()}) {msg}" : msg);
-                    break;
-                case LogLevel.Warning:
-                    GD.PushWarning(context is not null ? $"(#{context.GetInstanceId()}) {msg}" : msg);
-                    break;
-                default:
-                    GD.Print(context is not null ? $"(#{context.GetInstanceId()}) {msg}" : msg);
-                    break;
+                switch (log.LogInfo.LogLevel)
+                {
+                    case LogLevel.Error or LogLevel.Critical:
+                        GD.PushError(context is not null ? $"(#{context.GetInstanceId()}) {msg}" : msg);
+                        break;
+                    case LogLevel.Warning:
+                        GD.PushWarning(context is not null ? $"(#{context.GetInstanceId()}) {msg}" : msg);
+                        break;
+                    default:
+                        GD.Print(context is not null ? $"(#{context.GetInstanceId()}) {msg}" : msg);
+                        break;
+                }
+            }
+            finally
+            {
+                isWritingToGodot = wasWritingToGodot;
             }
         }
         finally
@@ -105,6 +118,11 @@ internal sealed partial class GodotOSLogger(ILogger logger) : Godot.Logger
         bool editorNotify, int errorType, Array<ScriptBacktrace> scriptBacktraces)
     {
         base._LogError(function, file, line, code, rationale, editorNotify, errorType, scriptBacktraces);
+        if (GodotDebugLogProcessor.IsWritingToGodot)
+        {
+            return;
+        }
+
         switch (errorType)
         {
             case (int)ErrorType.Error:
@@ -125,6 +143,10 @@ internal sealed partial class GodotOSLogger(ILogger logger) : Godot.Logger
     public override void _LogMessage(string message, bool error)
     {
         base._LogMessage(message, error);
+        if (GodotDebugLogProcessor.IsWritingToGodot)
+        {
+            return;
+        }
 
         if (error)
         {
@@ -142,14 +164,17 @@ public class ZLoggerGodotDebugLoggerProvider : ILoggerProvider, ISupportExternal
 {
     readonly ZLoggerOptions options;
     readonly GodotDebugLogProcessor processor;
+    readonly GodotOSLogger godotLogger;
     IExternalScopeProvider? scopeProvider;
+    int isDisposed;
 
     public ZLoggerGodotDebugLoggerProvider(ZLoggerGodotDebugOptions options)
     {
         this.options = options;
         this.processor = new GodotDebugLogProcessor(options);
 
-        OS.AddLogger(new GodotOSLogger(CreateLogger("OSLogger")));
+        godotLogger = new GodotOSLogger(CreateLogger("OSLogger"));
+        OS.AddLogger(godotLogger);
 
         if (options.EPluginIntegration)
         {
@@ -166,12 +191,53 @@ public class ZLoggerGodotDebugLoggerProvider : ILoggerProvider, ISupportExternal
 
     public void Dispose()
     {
-        processor.DisposeAsync().AsTask().Wait();
+        if (!TryBeginDispose())
+        {
+            return;
+        }
+
+        try
+        {
+            RemoveGodotLogger();
+        }
+        finally
+        {
+            processor.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        }
     }
 
     public async ValueTask DisposeAsync()
     {
-        await processor.DisposeAsync().ConfigureAwait(false);
+        if (!TryBeginDispose())
+        {
+            return;
+        }
+
+        try
+        {
+            RemoveGodotLogger();
+        }
+        finally
+        {
+            await processor.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
+    bool TryBeginDispose()
+    {
+        return Interlocked.Exchange(ref isDisposed, 1) == 0;
+    }
+
+    void RemoveGodotLogger()
+    {
+        try
+        {
+            OS.RemoveLogger(godotLogger);
+        }
+        finally
+        {
+            godotLogger.Dispose();
+        }
     }
 
     public void SetScopeProvider(IExternalScopeProvider scopeProvider)
