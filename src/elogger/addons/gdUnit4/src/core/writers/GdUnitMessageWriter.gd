@@ -1,5 +1,5 @@
 @tool
-class_name GdUnitMessageWritter
+@abstract class_name GdUnitMessageWriter
 extends RefCounted
 ## Base interface class for writing formatted messages to different outputs.[br]
 ## [br]
@@ -64,14 +64,14 @@ var _current_flags := 0
 var _current_align := Align.LEFT
 
 ## The current text effect to be used for the next output operation
-var _current_effect := Effect.NONE
+var _current_effect := GdUnitMessageWriter.Effect.NONE
 
 
 ## Sets the text color for the next output operation.[br]
 ## [br]
 ## [param value] The color to be used for the text.
 ## Returns self for method chaining.
-func color(value: Color) -> GdUnitMessageWritter:
+func color(value: Color) -> GdUnitMessageWriter:
 	_current_color = value
 	return self
 
@@ -80,7 +80,7 @@ func color(value: Color) -> GdUnitMessageWritter:
 ## [br]
 ## [param value] The number of indentation levels, where each level equals two spaces.
 ## Returns self for method chaining.
-func indent(value: int) -> GdUnitMessageWritter:
+func indent(value: int) -> GdUnitMessageWriter:
 	_current_indent = value
 	return self
 
@@ -89,7 +89,7 @@ func indent(value: int) -> GdUnitMessageWritter:
 ## [br]
 ## [param value] A combination of style flags (BOLD, ITALIC, UNDERLINE).
 ## Returns self for method chaining.
-func style(value: int) -> GdUnitMessageWritter:
+func style(value: int) -> GdUnitMessageWriter:
 	_current_flags = value
 	return self
 
@@ -98,7 +98,7 @@ func style(value: int) -> GdUnitMessageWritter:
 ## [br]
 ## [param value] The effect to apply to the text (NONE, WAVE).
 ## Returns self for method chaining.
-func effect(value: Effect) -> GdUnitMessageWritter:
+func effect(value: GdUnitMessageWriter.Effect) -> GdUnitMessageWriter:
 	_current_effect = value
 	return self
 
@@ -107,7 +107,7 @@ func effect(value: Effect) -> GdUnitMessageWritter:
 ## [br]
 ## [param value] The alignment to use (LEFT, RIGHT).
 ## Returns self for method chaining.
-func align(value: Align) -> GdUnitMessageWritter:
+func align(value: Align) -> GdUnitMessageWriter:
 	_current_align = value
 	return self
 
@@ -121,7 +121,7 @@ func align(value: Align) -> GdUnitMessageWritter:
 ## - align: LEFT[br]
 ## - effect: NONE[br]
 ## Returns self for method chaining.
-func reset() -> GdUnitMessageWritter:
+func reset() -> GdUnitMessageWriter:
 	_current_color = Color.WHITE
 	_current_indent = 0
 	_current_flags = 0
@@ -147,17 +147,19 @@ func prints_error(message: String) -> void:
 ## Prints a message with current formatting settings.[br]
 ## [br]
 ## [param message] The text to print.
-func print_message(message: String) -> void:
+func print_message(message: String) -> GdUnitMessageWriter:
 	_print_message(message, _current_color, _current_indent, _current_flags)
 	reset()
+	return self
 
 
 ## Prints a message with current formatting settings followed by a newline.[br]
 ## [br]
 ## [param message] The text to print.
-func println_message(message: String) -> void:
+func println_message(message: String) -> GdUnitMessageWriter:
 	_println_message(message, _current_color, _current_indent, _current_flags)
 	reset()
+	return self
 
 
 ## Prints a message at a specific column position with current formatting settings.[br]
@@ -169,46 +171,59 @@ func print_at(message: String, cursor_pos: int) -> void:
 	reset()
 
 
+## Prints a stack trace with the current indentation setting.[br]
+## [br]
+## [param stack_trace] The stack trace to print.
+func print_stack_trace(stack_trace: GdUnitStackTrace) -> void:
+	if stack_trace:
+		_print_stack_trace(stack_trace, _current_indent)
+
+
+## Internal implementation of print_stack_trace.[br]
+## [br]
+## To be overridden by concrete formatters.[br]
+## [br]
+## [param stack_trace] The stack trace to print.[br]
+## [param current_indent] The indentation level.
+@abstract func _print_stack_trace(stack_trace: GdUnitStackTrace, current_indent: int) -> void
+
+
 ## Internal implementation of print_message.[br]
 ## [br]
 ## To be overridden by concrete formatters.[br]
 ## [br]
-## [param message] The text to print.[br]
-## [param color] The color to use.[br]
-## [param indent] The indentation level.[br]
-## [param flags] The style flags to apply.
-func _print_message(_message: String, _color: Color, _indent: int, _flags: int) -> void:
-	pass
+## [param _message] The text to print.[br]
+## [param _color] The color to use.[br]
+## [param _indent] The indentation level.[br]
+## [param _flags] The style flags to apply.
+@abstract func _print_message(_message: String, _color: Color, _indent: int, _flags: int) -> void
 
 
 ## Internal implementation of println_message.[br]
 ## [br]
 ## To be overridden by concrete formatters.[br]
 ## [br]
-## [param message] The text to print.[br]
-## [param color] The color to use.[br]
-## [param indent] The indentation level.[br]
-## [param flags] The style flags to apply.
-func _println_message(_message: String, _color: Color, _indent: int, _flags: int) -> void:
-	pass
+## [param _message] The text to print.[br]
+## [param _color] The color to use.[br]
+## [param _indent] The indentation level.[br]
+## [param _flags] The style flags to apply.
+@abstract func _println_message(_message: String, _color: Color, _indent: int, _flags: int) -> void
 
 
 ## Internal implementation of print_at.[br]
 ## [br]
 ## To be overridden by concrete formatters.[br]
 ## [br]
-## [param message] The text to print.[br]
-## [param cursor_pos] The column position.[br]
-## [param color] The color to use.[br]
-## [param effect] The effect to apply.[br]
-## [param align] The text alignment.[br]
-## [param flags] The style flags to apply.
-func _print_at(_message: String, _cursor_pos: int, _color: Color, _effect: Effect, _align: Align, _flags: int) -> void:
-	pass
+## [param _message] The text to print.[br]
+## [param _cursor_pos] The column position.[br]
+## [param _color] The color to use.[br]
+## [param _effect] The effect to apply.[br]
+## [param _align] The text alignment.[br]
+## [param _flags] The style flags to apply.
+@abstract func _print_at(_message: String, _cursor_pos: int, _color: Color, _effect: GdUnitMessageWriter.Effect, _align: Align, _flags: int) -> void
 
 
 ## Clears all output content.[br]
 ## [br]
 ## To be overridden by concrete formatters.
-func clear() -> void:
-	pass
+@abstract func clear() -> void

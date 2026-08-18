@@ -31,10 +31,6 @@ func report_error(error :String) -> GdUnitDictionaryAssert:
 	return self
 
 
-func failure_message() -> String:
-	return _base.failure_message()
-
-
 func override_failure_message(message: String) -> GdUnitDictionaryAssert:
 	@warning_ignore("return_value_discarded")
 	_base.override_failure_message(message)
@@ -137,7 +133,8 @@ func _contains_keys(expected: Array, compare_mode: GdObjects.COMPARE_MODE) -> Gd
 	var keys_not_found :Array = expected_value.filter(_filter_by_key.bind((current as Dictionary).keys(), compare_mode))
 	if not keys_not_found.is_empty():
 		@warning_ignore("unsafe_cast")
-		return report_error(GdAssertMessages.error_contains_keys((current as Dictionary).keys() as Array, expected_value, keys_not_found, compare_mode))
+		return report_error(GdAssertMessages.error_contains_keys((current as Dictionary).keys() as Array, expected_value,
+			keys_not_found, compare_mode))
 	return report_success()
 
 
