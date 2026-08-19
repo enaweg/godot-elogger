@@ -28,6 +28,11 @@ jobs:
         run: |
           sed -i "s/version=\".*\"/version=\"${{ env.VERSION }}\"/g" src/elogger/addons/eLogger/plugin.cfg
 
+      - name: Deactivate plugin for distribution
+        shell: bash
+        run: |
+          mv src/elogger/addons/eLogger/src src/elogger/addons/eLogger/.src
+
       - name: Create artifact
         shell: bash
         run: |
