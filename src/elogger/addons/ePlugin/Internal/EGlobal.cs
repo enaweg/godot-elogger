@@ -264,6 +264,11 @@ internal sealed class EGlobal
                 context.FailedTries = uint.MaxValue;
                 return;
             }
+
+            if (nuget.Source is not null)
+            {
+                NugetConfigManager.RegisterSource(context.Slug, nuget.Source, context.Logger);
+            }
         }
 
         foreach (var project in recipe.Projects)
@@ -408,6 +413,11 @@ internal sealed class EGlobal
         foreach (var nuget in recipe.Nugets)
         {
             context.Cli!.RemoveNugetFromProject(nuget.Name);
+
+            if (nuget.Source is not null)
+            {
+                NugetConfigManager.UnregisterSource(context.Slug, nuget.Source, context.Logger);
+            }
         }
     }
 
@@ -515,7 +525,7 @@ internal sealed class EGlobal
         }
     }
 
-    private bool MatchesVersion(string givenVersion, string condition, ILogger? logger)
+    internal bool MatchesVersion(string givenVersion, string condition, ILogger? logger)
     {
         if (string.IsNullOrWhiteSpace(givenVersion) || string.IsNullOrWhiteSpace(condition))
             return false;
