@@ -22,7 +22,7 @@ jobs:
           fetch-tags: true
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 8.0.x
 
@@ -80,7 +80,7 @@ jobs:
 
       - name: Build Changelog
         id: build_changelog
-        uses: mikepenz/release-changelog-builder-action@v6.2.3
+        uses: mikepenz/release-changelog-builder-action@v6.3.0
         with:
           mode: "HYBRID"
           configurationJson: |
