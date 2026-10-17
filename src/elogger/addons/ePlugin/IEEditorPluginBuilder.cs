@@ -26,7 +26,7 @@ public interface IEEditorPluginBuilder : IEEditorPluginRecipeBuilder
     new IEEditorPluginBuilder AddProject(string path, bool addReference = true);
 
     /// <inheritdoc cref="IEEditorPluginRecipeBuilder.AddProject(string, string, bool)"/>
-    new IEEditorPluginBuilder AddProject(string path, string? virtualFolderName = null, bool addReference = true);
+    new IEEditorPluginBuilder AddProject(string path, string? virtualFolderName, bool addReference = true);
 
     /// <inheritdoc cref="IEEditorPluginRecipeBuilder.AddNugets"/>
     new IEEditorPluginBuilder AddNugets(params string[] nugetNames);
@@ -36,6 +36,36 @@ public interface IEEditorPluginBuilder : IEEditorPluginRecipeBuilder
 
     /// <inheritdoc cref="IEEditorPluginRecipeBuilder.AddDirectory"/>
     new IEEditorPluginBuilder AddDirectory(string path);
+
+    /// <summary>
+    /// Sets the plugin's license. It is shown in the ePlugin Manager and, when <c>plugin.cfg</c> sets
+    /// <c>license_required=true</c>, has to be accepted before the plugin is enabled. It replaces the
+    /// <c>license_file</c> of <c>plugin.cfg</c> and the <c>LICENSE</c> file of the plugin directory.
+    /// </summary>
+    /// <param name="license">
+    /// Either the license text, which may contain BBCode, or the <c>res://</c> path of the file holding it
+    /// (e.g. <c>$"{this.GetPluginDirectory()}/EULA.txt"</c>). A value starting with <c>res://</c> is a path.
+    /// </param>
+    /// <remarks>
+    /// Acceptance is tracked by the path, or for a text by its contents: changing the path or the text asks for the
+    /// license to be accepted again. A license set here is only known once the plugin's code is compiled, so an update
+    /// that changes it is asked about after it is installed: declining then disables the plugin.
+    /// </remarks>
+    /// <returns>The builder itself.</returns>
+    IEEditorPluginBuilder SetLicense(string license);
+
+    /// <summary>
+    /// Sets the plugin's welcome page. It is shown once per project after the plugin is installed, and can be read
+    /// again in the ePlugin Manager. It replaces the <c>welcome_file</c> of <c>plugin.cfg</c> and the <c>README</c>
+    /// file of the plugin directory.
+    /// </summary>
+    /// <param name="welcome">
+    /// Either the welcome text, which may contain BBCode, or the <c>res://</c> path of the file holding it
+    /// (e.g. <c>$"{this.GetPluginDirectory()}/WELCOME.txt"</c>). A value starting with <c>res://</c> is a path.
+    /// </param>
+    /// <remarks>Updates never show the welcome page, also not when they change it.</remarks>
+    /// <returns>The builder itself.</returns>
+    IEEditorPluginBuilder SetWelcome(string welcome);
 
     /// <summary>
     /// Declares a dependency on another plugin (C# or GDScript). The framework enables the
@@ -48,11 +78,17 @@ public interface IEEditorPluginBuilder : IEEditorPluginRecipeBuilder
     /// </param>
     /// <param name="version">
     /// Optional version constraint matched against the dependency's <c>plugin.cfg</c>.
-    /// Use an exact version (<c>"1.2.3"</c>) or a "<c>&gt;</c>"-prefixed value
-    /// (<c>"&gt;1.2.0"</c>) which is interpreted as "this version or higher".
-    /// Versions must follow <c>[major].[minor].[patch]</c>; semver pre-release suffixes are
-    /// stripped before comparison. When <see langword="null"/>, any installed version is accepted.
+    /// Use an exact version (<c>"1.2.3"</c>) or a minimum (<c>"&gt;=1.2.0"</c>, this version or higher; the older
+    /// form <c>"&gt;1.2.0"</c> means the same). Versions are written like <c>plugin.cfg</c> versions: an optional
+    /// <c>v</c>, two to four numbers, a prerelease suffix and build metadata. Only the numbers are compared, so
+    /// <c>1.2</c> equals <c>1.2.0</c> and <c>1.2.3-beta.1</c> satisfies <c>1.2.3</c>. When <see langword="null"/>,
+    /// any installed version is accepted.
     /// </param>
+    /// <remarks>
+    /// Every recipe depends on the framework (<c>ePlugin</c>) already; naming it here only adds a version constraint.
+    /// A plugin cannot be both a required and an optional dependency, and must not depend on itself, also not through
+    /// other plugins: such a cycle fails the activation.
+    /// </remarks>
     /// <returns>The builder itself.</returns>
     IEEditorPluginBuilder AddPluginDependency(string pluginSlug, string? version = null);
 

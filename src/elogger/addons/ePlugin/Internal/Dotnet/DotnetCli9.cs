@@ -1,74 +1,61 @@
-﻿#if TOOLS
+#if TOOLS
 using System.Collections.Generic;
-using System.IO;
-using System.Linq;
 using Enaweg.Plugin.Logging;
-using Godot;
 
 namespace Enaweg.Plugin.Internal.Dotnet;
 
-internal sealed class DotnetCli9(ILogger? logger, bool enableDebugLogging)
-    : DotnetCliBase(logger, enableDebugLogging), IDotnetCli
+/// <summary>The dotnet CLI before .NET 10: <c>dotnet add|remove &lt;project&gt; package|reference</c>.</summary>
+internal sealed class DotnetCli9(ILogger? logger, bool enableDebugLogging, IProcessRunner? runner = null,
+    string? projectRoot = null)
+    : DotnetCliBase(logger, enableDebugLogging, runner, projectRoot)
 {
     private const string CmdDotNet = "dotnet";
 
     public override void RebuildSolution()
     {
-        Execute(["build"]);
+        TryRebuildSolution();
+    }
+
+    public override bool TryRebuildSolution() => TryBuild().ExitCode == 0;
+
+    public override BuildOutcome TryBuild()
+    {
+        var result = Execute(["build", SolutionPath, "--no-incremental"]);
+        return new BuildOutcome(result.Item1, result.Item2);
     }
 
     public override void RunTests()
     {
-        Execute(["test"]);
+        Execute(["test", SolutionPath]);
     }
 
     public override void RemoveProjectFromSolution(string projectPath)
     {
-        var pathToSolution = ProjectSettings.GlobalizePath("res://");
+        TryRemoveProjectFromSolution(projectPath);
+    }
 
-        Execute([
-            "sln",
-            $"\"{SolutionPath}\"",
-            "remove",
-            Path.Combine(pathToSolution, projectPath)
-        ]);
+    public override bool TryRemoveProjectFromSolution(string projectPath)
+    {
+        if (CheckSolutionRemoval(projectPath) is { } settled) return settled;
+        return Execute(["sln", SolutionPath, "remove", ProjectFile(projectPath)]).Item1 == 0;
     }
 
     public override void AddProjectToSolution(string projectPath, string? virtualFolderName = null)
     {
-        var pathToSolution = ProjectSettings.GlobalizePath("res://");
+        TryAddProjectToSolution(projectPath, virtualFolderName);
+    }
 
-        if (virtualFolderName is null)
-        {
-            Execute([
-                "sln",
-                $"\"{SolutionPath}\"",
-                "add",
-                Path.Combine(pathToSolution, projectPath)
-            ]);
-        }
-        else
-        {
-            Execute([
-                "sln",
-                $"\"{SolutionPath}\"",
-                "add",
-                "-s", virtualFolderName,
-                Path.Combine(pathToSolution, projectPath)
-            ]);
-        }
+    public override bool TryAddProjectToSolution(string projectPath, string? virtualFolderName)
+    {
+        return Execute(virtualFolderName is null
+            ? ["sln", SolutionPath, "add", ProjectFile(projectPath)]
+            : ["sln", SolutionPath, "add", "-s", virtualFolderName, ProjectFile(projectPath)]).Item1 == 0;
     }
 
     public override bool AddNugetToProject(string nugetName, string? version = null, string? source = null,
         bool prerelease = false)
     {
-        var globalSourcePath = ProjectSettings.GlobalizePath(source);
-        var args = new List<string>();
-
-        args.Add("add");
-        args.Add($"\"{GodotProjectPath}\"");
-        args.Add("package");
-        args.Add(nugetName);
+        var args = new List<string> { "add", GodotProjectPath, "package", nugetName };
         if (version is not null)
         {
             args.Add("--version");
@@ -78,7 +65,7 @@ internal sealed class DotnetCli9(ILogger? logger, bool enableDebugLogging)
         if (source is not null)
         {
             args.Add("--source");
-            args.Add($"\"{globalSourcePath}\"");
+            args.Add(NugetSource(source));
         }
 
         if (prerelease)
@@ -86,20 +73,11 @@ internal sealed class DotnetCli9(ILogger? logger, bool enableDebugLogging)
             args.Add("--prerelease");
         }
 
-        var result = Execute(args.ToArray());
-
-        var installSuccess = result.Item1 == 0;
-
+        var installSuccess = Execute(args.ToArray()).Item1 == 0;
         if (!installSuccess)
         {
-            if (version is not null)
-            {
-                logger?.Error($"Installing {nugetName} v{version} failed! {result.Item2.First()}");
-            }
-            else
-            {
-                logger?.Error($"Installing {nugetName} failed! {result.Item2.First()}");
-            }
+            // the command's output is logged with its exit code
+            Logger?.Error(version is not null ? $"Installing {nugetName} v{version} failed!" : $"Installing {nugetName} failed!");
         }
 
         return installSuccess;
@@ -107,37 +85,39 @@ internal sealed class DotnetCli9(ILogger? logger, bool enableDebugLogging)
 
     public override void RemoveNugetFromProject(string nugetName)
     {
-        Execute([
-            "remove",
-            $"\"{GodotProjectPath}\"",
-            "package",
-            nugetName
-        ]);
+        TryRemoveNugetFromProject(nugetName);
+    }
+
+    public override bool TryRemoveNugetFromProject(string nugetName)
+    {
+        if (CheckPackageRemoval(nugetName) is { } settled) return settled;
+        return Execute(["remove", GodotProjectPath, "package", nugetName]).Item1 == 0;
     }
 
     public override void AddProjectReference(string projectReference)
     {
-        Execute([
-            "add",
-            $"\"{GodotProjectPath}\"",
-            "reference",
-            projectReference,
-        ]);
+        TryAddProjectReference(projectReference);
+    }
+
+    public override bool TryAddProjectReference(string projectReference)
+    {
+        return Execute(["add", GodotProjectPath, "reference", ProjectFile(projectReference)]).Item1 == 0;
     }
 
     public override void RemoveProjectReference(string projectReference)
     {
-        Execute([
-            "remove",
-            $"\"{GodotProjectPath}\"",
-            "reference",
-            projectReference,
-        ]);
+        TryRemoveProjectReference(projectReference);
+    }
+
+    public override bool TryRemoveProjectReference(string projectReference)
+    {
+        if (CheckProjectReferenceRemoval(projectReference) is { } settled) return settled;
+        return Execute(["remove", GodotProjectPath, "reference", ProjectFile(projectReference)]).Item1 == 0;
     }
 
     public override (int, string[]) Execute(string command, string[] args)
     {
-        return ExecuteCall(CmdDotNet, args);
+        return Execute([command, ..args]);
     }
 
     private (int, string[]) Execute(string[] args)

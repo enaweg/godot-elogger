@@ -21,6 +21,14 @@ public static class EPlugin
 {
     private static IEPlugin? _instanceCache;
 
+    /// <summary>Gets the progress service for custom C# editor operations.</summary>
+    /// <remarks>
+    /// Available without looking up the framework's editor node. Begin on the editor thread to allow the native
+    /// helper to start, then report from any thread. A missing or failing helper leaves the operation running without
+    /// a window. Scopes leave Project Settings visible and must be disposed when their work ends.
+    /// </remarks>
+    public static IEPluginProgress Progress { get; } = new EPluginProgress();
+
     /// <summary>
     /// Gets the singleton <see cref="IEPlugin"/> node hosting the ePlugin framework.
     /// </summary>
@@ -32,13 +40,18 @@ public static class EPlugin
     {
         get
         {
-            _instanceCache ??= (IEPlugin)(EditorInterface.Singleton.GetBaseControl().GetParent().GetChildren()
+            _instanceCache ??= (IEPlugin?)(EditorInterface.Singleton.GetBaseControl().GetParent().GetChildren()
                 .FirstOrDefault(c => c is IEPlugin));
 
             return _instanceCache;
         }
     }
 
+    /// <summary>
+    /// Queues an initializer whose <see cref="IInitialize.Initialize"/> is called once the framework has finished
+    /// starting up.
+    /// </summary>
+    /// <param name="initializer">The initializer to call.</param>
     public static void RegisterInitializer(IInitialize initializer)
     {
         EGlobal.Instance.AddInitializer(initializer);
