@@ -71,7 +71,7 @@ subclasses `Godot.Logger`, which was first exposed to scripting in 4.5.
 2. Extract `addons/eLogger` and `addons/ePlugin` into your Godot project's `addons` directory. eLogger depends on ePlugin.
 3. Open the project in the Godot .NET editor and enable **ePlugin** and **eLogger** under **Project > Project Settings > Plugins**.
 
-Enabling eLogger adds the required `ZLogger` and `ZString` NuGet packages to the project and exposes the plugin's runtime source directory. No manual `dotnet add package` command is needed.
+Enabling eLogger adds the required `ZLogger` and `ZString` NuGet packages to the project and exposes the plugin's runtime source directory. No manual `dotnet add package` command is needed. A welcome page with first steps is shown once after eLogger is enabled, and new eLogger releases are offered in the ePlugin Manager.
 
 ## Features
 

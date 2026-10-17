@@ -44,7 +44,7 @@ To run a single test suite, pass it as an extra argument to the script; extra ar
 ./addons/gdUnit4/runtest.sh --godot_binary /path/to/godot -a res://Tests/GodotOSLoggerTest.cs
 ```
 
-Tests live in `src/elogger/Tests/`. gdUnit4 discovers them there via `[gdunit4] settings/test/test_lookup_folder` in `project.godot`. C# test support comes from the `gdUnit4.api` and `gdUnit4.test.adapter` NuGet packages plus the vendored gdUnit4 addon (v6.2.1).
+Tests live in `src/elogger/Tests/`. gdUnit4 discovers them there via `[gdunit4] settings/test/test_lookup_folder` in `project.godot`. C# test support comes from the `gdUnit4.api` and `gdUnit4.test.adapter` NuGet packages plus the vendored gdUnit4 addon (v6.2.2).
 
 ## Architecture
 
@@ -52,7 +52,7 @@ Tests live in `src/elogger/Tests/`. gdUnit4 discovers them there via `[gdunit4] 
 
 `src/elogger/addons/` contains two distinct plugins that are always co-deployed:
 
-- **`ePlugin/`** — the plugin lifecycle framework (vendored at v0.7.0, upstream: [godot-epluginframework](https://github.com/enaweg/godot-epluginframework)). It is the dependency; it has no knowledge of ZLogger.
+- **`ePlugin/`** — the plugin lifecycle framework (vendored at v0.10.0, upstream: [godot-epluginframework](https://github.com/enaweg/godot-epluginframework)). It is the dependency; it has no knowledge of ZLogger.
 - **`eLogger/`** — the ZLogger-to-Godot bridge. It depends on ePlugin.
 
 Godot 4.4+ generates a `.uid` sidecar file next to each script or resource. Leave these files alone and let Godot manage them.
@@ -98,3 +98,11 @@ All editor-only code—everything in ePlugin and `ELoggerPlugin.cs`—is wrapped
 ### Hidden source directory convention
 
 When ePlugin installs a plugin's source directory, it calls `ShowHideHelper.ShowDirectory`, which removes the leading `.` prefix (for example, `.src` becomes `src`) so Godot can see and compile the files. On disable, it reverses this by renaming the directory back to a dot-prefixed name. This is why `ELoggerPlugin.CreateRecipe` refers to `$"{this.GetPluginDirectory()}/.src"`.
+
+### Plugin metadata, updates and welcome page
+
+`addons/eLogger/plugin.cfg` declares `update_url` (the GitHub releases page), `documentation_url` and `source_url`; ePlugin 0.9.0+ reads them for the ePlugin Manager's update checks and plugin details. The updater reads `update_url` from the installed `plugin.cfg`, so every release must keep it. `addons/eLogger/README` (BBCode, no extension) is the welcome page ePlugin shows once after the plugin is enabled; keep it BBCode, not Markdown.
+
+Releases are what the updater installs: `ci-release.yml` writes the tag's version (prerelease suffix included) into `plugin.cfg`, renames `src` back to `.src`, and zips `addons/eLogger` as the single release asset. Keep the plugin's root code (`ELoggerPlugin.cs`) compilable with only Godot and ePlugin, and keep `CreateRecipe` deterministic, because an update reconciles the old and new recipes.
+
+Update the vendored `addons/ePlugin/` from an ePlugin release ZIP (it contains the prebuilt progress helper under `progress/`), not from the upstream repository's sources, and with the Godot editor closed so it does not regenerate the `.uid` files.
