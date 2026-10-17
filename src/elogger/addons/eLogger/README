@@ -1,0 +1,38 @@
+[font_size=22][b]Welcome to eLogger[/b][/font_size]
+
+eLogger brings [url=https://github.com/Cysharp/ZLogger]ZLogger[/url], the zero-allocation text and structured logger for .NET, to Godot. Enabling the plugin added the [code]ZLogger[/code] and [code]ZString[/code] NuGet packages to your project and made eLogger's runtime code available, so you can start logging right away.
+
+[b]What it does for you[/b]
+[ul]
+[b]Godot output:[/b] log entries go to the Output panel ([code]GD.Print[/code]), and warnings and errors to the Debugger ([code]GD.PushWarning[/code], [code]GD.PushError[/code]).
+[b]Engine messages:[/b] engine, script and shader errors and everything printed through [code]GD.Print[/code] are fed back into ZLogger, under the categories [code]Godot.Engine[/code], [code]Godot.Script[/code], [code]Godot.Shader[/code] and [code]Godot.Output[/code], so they reach every sink you configured.
+[b]Readable exceptions:[/b] stack traces are cleaned up and point to [code]res://[/code] paths with line numbers.
+[b]ePlugin logging:[/b] in the editor, the messages of ePlugin and the plugins built on it are logged through ZLogger as well.
+[/ul]
+
+[b]Where to start[/b]
+Add the Godot provider wherever you create your loggers, for example in an autoload:
+
+[code]using Microsoft.Extensions.Logging;
+using ZLogger;
+using Enaweg.Logger;
+
+using var factory = LoggerFactory.Create(logging =>
+{
+    logging.SetMinimumLevel(LogLevel.Trace);
+    logging.AddZLoggerGodotDebug();
+});
+
+var logger = factory.CreateLogger("MyGame");
+logger.ZLogInformation($"Player spawned at {position}");[/code]
+
+Formatters, JSON output, filters and other sinks such as [code]AddZLoggerFile[/code] are configured as in plain ZLogger. Use [code]logging.AddFilter("Godot.Output", LogLevel.None)[/code] to stop mirroring [code]GD.Print[/code].
+
+[b]Good to know[/b]
+[ul]
+Godot 4.5 or newer is required: engine messages are captured through [code]Godot.Logger[/code], which Godot 4.5 introduced.
+Disabling eLogger removes the NuGet packages again and hides its runtime code, so game code that uses it no longer compiles.
+New eLogger versions are offered in the [b]ePlugin Manager[/b] (ePlugin button on the main toolbar, or [b]Project > Tools > ePlugin Manager...[/b]).
+[/ul]
+
+Documentation and source: [url=https://github.com/enaweg/godot-elogger]github.com/enaweg/godot-elogger[/url]
