@@ -71,13 +71,7 @@ subclasses `Godot.Logger`, which was first exposed to scripting in 4.5.
 2. Extract `addons/eLogger` and `addons/ePlugin` into your Godot project's `addons` directory. eLogger depends on ePlugin.
 3. Open the project in the Godot .NET editor and enable **ePlugin** and **eLogger** under **Project > Project Settings > Plugins**.
 
-Enabling eLogger adds the required `ZLogger` and `ZString` NuGet packages to the project and exposes the plugin's runtime source directory. No manual `dotnet add package` command is needed. A welcome page with first steps is shown once after eLogger is enabled; it can be opened again from the plugin's details in the ePlugin Manager.
-
-### Updates
-
-eLogger declares its [releases](https://github.com/enaweg/godot-elogger/releases) as its update source, along with links to this documentation and its source code. With [ePlugin](https://github.com/enaweg/godot-epluginframework) 0.9.0 or newer, the **ePlugin Manager** (the ePlugin button on the main toolbar, or **Project > Tools > ePlugin Manager...**) checks for new eLogger versions, installs them with a backup and rollback, and offers older versions as well. ePlugin updates itself the same way. See [Updating plugins](https://github.com/enaweg/godot-epluginframework/blob/main/docs/updating-plugins.md) for details.
-
-Commit `addons/eplugin-state.json` together with the addon folders: it records the installed plugin versions and the welcome pages already shown for the project.
+Enabling eLogger adds the required `ZLogger` and `ZString` NuGet packages to the project and exposes the plugin's runtime source directory. No manual `dotnet add package` command is needed. A welcome page with first steps is shown once after eLogger is enabled, and new eLogger releases are offered in the ePlugin Manager.
 
 ## Features
 
@@ -90,7 +84,7 @@ Commit `addons/eplugin-state.json` together with the addon folders: it records t
 + Configured through `ZLoggerGodotDebugOptions`, which derives from `ZLoggerOptions` — custom formatters, JSON output, timestamps, and `IncludeScopes` all work as they do in plain ZLogger. The provider implements `ISupportExternalScope`, so `BeginScope` state flows through. It is registered under the `ZLoggerGodotDebug` provider alias for configuration-driven filtering.
 + Guards against double logging: output the plugin itself writes to Godot is not re-captured by the engine interceptor and logged a second time.
 + Optional integration with [ePlugin](https://github.com/enaweg/godot-epluginframework) logging (on by default), so plugin lifecycle messages are handled by ZLogger too. It is skipped automatically outside the editor, where ePlugin is not running.
-+ Uses the [ePlugin Framework](https://github.com/enaweg/godot-epluginframework) to manage NuGet packages and runtime source files when the plugin is enabled, and to update eLogger from its GitHub releases through the ePlugin Manager.
++ Uses the [ePlugin Framework](https://github.com/enaweg/godot-epluginframework) to manage NuGet packages and runtime source files when the plugin is enabled.
 
 ## Examples
 
@@ -173,7 +167,7 @@ See the [CI workflow](https://github.com/enaweg/godot-elogger/blob/main/.github/
 `src/elogger/addons/` contains two plugins that are always co-deployed:
 
 - **`ePlugin/`** — the plugin lifecycle framework (vendored, upstream: [godot-epluginframework](https://github.com/enaweg/godot-epluginframework)). It manages plugin dependencies, NuGet packages, project references, autoloads, and source directories.
-- **`eLogger/`** — the ZLogger-to-Godot bridge described above. It depends on ePlugin. Its `plugin.cfg` declares the update source and the documentation and source links, and its BBCode `README` is the welcome page the ePlugin Manager shows.
+- **`eLogger/`** — the ZLogger-to-Godot bridge described above. It depends on ePlugin.
 
 ## Contribute
 
