@@ -20,5 +20,6 @@ mono_crash.*.json
 
 # gdUnit Test ignores
 reports/
+gdunit4_testadapter_v5/
 
 build/

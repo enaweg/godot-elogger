@@ -1,5 +1,3 @@
-using System;
-using System.Collections.Generic;
 using GdUnit4;
 using Microsoft.Extensions.Logging;
 using static GdUnit4.Assertions;
@@ -12,54 +10,45 @@ public class EPluginLoggerTest
     [TestCase]
     public void Log_ForwardsMessageAtInformationLevel()
     {
-        var recorder = new RecordingLogger();
-        var sut = new EPluginLogger(recorder);
+        var recorder = new LogRecorder();
+        var sut = new EPluginLogger(recorder.CreateLogger("ePlugin"));
 
         sut.Log("hello world");
 
-        AssertThat(recorder.Entries).HasSize(1);
-        AssertThat(recorder.Entries[0].Level).IsEqual(LogLevel.Information);
-        AssertThat(recorder.Entries[0].Message).IsEqual("hello world");
+        AssertThat(recorder.Entries).ContainsExactly(new RecordedLog("ePlugin", LogLevel.Information, "hello world"));
     }
 
     [TestCase]
     public void Warn_ForwardsMessageAtWarningLevel()
     {
-        var recorder = new RecordingLogger();
-        var sut = new EPluginLogger(recorder);
+        var recorder = new LogRecorder();
+        var sut = new EPluginLogger(recorder.CreateLogger("ePlugin"));
 
         sut.Warn("careful");
 
-        AssertThat(recorder.Entries).HasSize(1);
-        AssertThat(recorder.Entries[0].Level).IsEqual(LogLevel.Warning);
-        AssertThat(recorder.Entries[0].Message).IsEqual("careful");
+        AssertThat(recorder.Entries).ContainsExactly(new RecordedLog("ePlugin", LogLevel.Warning, "careful"));
     }
 
     [TestCase]
     public void Error_ForwardsMessageAtErrorLevel()
     {
-        var recorder = new RecordingLogger();
-        var sut = new EPluginLogger(recorder);
+        var recorder = new LogRecorder();
+        var sut = new EPluginLogger(recorder.CreateLogger("ePlugin"));
 
         sut.Error("boom");
 
-        AssertThat(recorder.Entries).HasSize(1);
-        AssertThat(recorder.Entries[0].Level).IsEqual(LogLevel.Error);
-        AssertThat(recorder.Entries[0].Message).IsEqual("boom");
+        AssertThat(recorder.Entries).ContainsExactly(new RecordedLog("ePlugin", LogLevel.Error, "boom"));
     }
 
-    sealed class RecordingLogger : ILogger
+    [TestCase]
+    public void Log_KeepsMessageTemplateSyntaxLiteral()
     {
-        public List<(LogLevel Level, string Message)> Entries { get; } = new();
+        var recorder = new LogRecorder();
+        var sut = new EPluginLogger(recorder.CreateLogger("ePlugin"));
 
-        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        // ePlugin messages are finished text (paths, dotnet output); braces must not be read as placeholders.
+        sut.Log("installed {Package} into {0} at C:\\{dir}");
 
-        public bool IsEnabled(LogLevel logLevel) => true;
-
-        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
-            Func<TState, Exception?, string> formatter)
-        {
-            Entries.Add((logLevel, formatter(state, exception)));
-        }
+        AssertThat(recorder.Entries[0].Message).IsEqual("installed {Package} into {0} at C:\\{dir}");
     }
 }

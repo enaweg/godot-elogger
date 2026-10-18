@@ -1,9 +1,5 @@
 using System;
-using System.Buffers;
-using System.Collections.Generic;
 using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 using GdUnit4;
 using Godot;
 using Microsoft.Extensions.Logging;
@@ -22,12 +18,7 @@ public partial class EngineErrorRoutingTest
         var marker = Guid.NewGuid().ToString("N");
         var sink = new MemorySink();
 
-        using (var factory = LoggerFactory.Create(logging =>
-               {
-                   logging.SetMinimumLevel(LogLevel.Trace);
-                   logging.AddZLoggerGodotDebug(o => o.EPluginIntegration = false);
-                   logging.AddZLoggerLogProcessor(sink);
-               }))
+        using (var factory = CreateFactory(sink))
         {
             // Force the provider (and with it the OS logger) to be created.
             factory.CreateLogger("warmup");
@@ -35,7 +26,9 @@ public partial class EngineErrorRoutingTest
             GD.PushError($"engine-error-{marker}");
         }
 
-        AssertThat(sink.Messages.Any(m => m.Contains($"engine-error-{marker}"))).IsTrue();
+        AssertThat(sink.Entries.Any(e => e.Message.Contains($"engine-error-{marker}")
+                                         && e.Level == LogLevel.Error
+                                         && e.Category == "Godot.Engine")).IsTrue();
     }
 
     [TestCase]
@@ -44,19 +37,55 @@ public partial class EngineErrorRoutingTest
         var marker = Guid.NewGuid().ToString("N");
         var sink = new MemorySink();
 
-        using (var factory = LoggerFactory.Create(logging =>
-               {
-                   logging.SetMinimumLevel(LogLevel.Trace);
-                   logging.AddZLoggerGodotDebug(o => o.EPluginIntegration = false);
-                   logging.AddZLoggerLogProcessor(sink);
-               }))
+        using (var factory = CreateFactory(sink))
         {
             factory.CreateLogger("warmup");
 
             GD.PushWarning($"engine-warning-{marker}");
         }
 
-        AssertThat(sink.Messages.Any(m => m.Contains($"engine-warning-{marker}"))).IsTrue();
+        AssertThat(sink.Entries.Any(e => e.Message.Contains($"engine-warning-{marker}")
+                                         && e.Level == LogLevel.Warning
+                                         && e.Category == "Godot.Engine")).IsTrue();
+    }
+
+    [TestCase]
+    public void EnginePrint_ReachesOtherSinksUnderTheOutputCategory()
+    {
+        var marker = Guid.NewGuid().ToString("N");
+        var sink = new MemorySink();
+
+        using (var factory = CreateFactory(sink))
+        {
+            factory.CreateLogger("warmup");
+
+            GD.Print($"engine-print-{marker}");
+            GD.PrintErr($"engine-printerr-{marker}");
+        }
+
+        AssertThat(sink.Entries.Any(e => e.Message.Contains($"engine-print-{marker}")
+                                         && e.Level == LogLevel.Information
+                                         && e.Category == "Godot.Output")).IsTrue();
+        AssertThat(sink.Entries.Any(e => e.Message.Contains($"engine-printerr-{marker}")
+                                         && e.Level == LogLevel.Error
+                                         && e.Category == "Godot.Output")).IsTrue();
+    }
+
+    [TestCase]
+    public void EngineCategoryPrefix_ConfiguredThroughTheBuilder_IsUsed()
+    {
+        var marker = Guid.NewGuid().ToString("N");
+        var sink = new MemorySink();
+
+        using (var factory = CreateFactory(sink, o => o.EngineCategoryPrefix = "MyGame.Godot"))
+        {
+            factory.CreateLogger("warmup");
+
+            GD.PushError($"engine-error-{marker}");
+        }
+
+        AssertThat(sink.Entries.Where(e => e.Message.Contains($"engine-error-{marker}")).Select(e => e.Category))
+            .ContainsExactly("MyGame.Godot.Engine");
     }
 
     [TestCase]
@@ -65,19 +94,48 @@ public partial class EngineErrorRoutingTest
         var marker = Guid.NewGuid().ToString("N");
         var sink = new MemorySink();
 
-        using (var factory = LoggerFactory.Create(logging =>
-               {
-                   logging.SetMinimumLevel(LogLevel.Trace);
-                   logging.AddZLoggerGodotDebug(o => o.EPluginIntegration = false);
-                   logging.AddZLoggerLogProcessor(sink);
-               }))
+        using (var factory = CreateFactory(sink))
         {
-            factory.CreateLogger("app").ZLogInformation($"app-message-{marker}");
+            var logger = factory.CreateLogger("app");
+            logger.ZLogInformation($"app-info-{marker}");
+            logger.ZLogWarning($"app-warning-{marker}");
+            logger.ZLogError($"app-error-{marker}");
         }
 
-        // The Godot processor prints this, which the OS logger sees again. The guard must stop it from being
-        // re-logged, otherwise every application log lands in every sink twice.
-        AssertThat(sink.Messages.Count(m => m.Contains($"app-message-{marker}"))).IsEqual(1);
+        // The Godot processor prints or pushes these, which the OS logger sees again. The guard must stop them
+        // from being re-logged, otherwise every application log lands in every sink twice.
+        AssertThat(sink.Entries.Count(e => e.Message.Contains($"app-info-{marker}"))).IsEqual(1);
+        AssertThat(sink.Entries.Count(e => e.Message.Contains($"app-warning-{marker}"))).IsEqual(1);
+        AssertThat(sink.Entries.Count(e => e.Message.Contains($"app-error-{marker}"))).IsEqual(1);
+    }
+
+    [TestCase]
+    public void GodotLogProcessorOutput_IsNotEchoedBackThroughTheOsLogger()
+    {
+        var marker = Guid.NewGuid().ToString("N");
+        var sink = new MemorySink();
+
+        using var factory = LoggerFactory.Create(logging =>
+        {
+            logging.SetMinimumLevel(LogLevel.Trace);
+            logging.AddZLoggerLogProcessor(new GodotLogProcessor(new ZLoggerOptions()));
+            logging.AddZLoggerLogProcessor(sink);
+        });
+        var osLogger = new GodotOSLogger(factory.CreateLogger);
+        OS.AddLogger(osLogger);
+        try
+        {
+            var logger = factory.CreateLogger("app");
+            logger.ZLogInformation($"app-info-{marker}");
+            logger.ZLogError($"app-error-{marker}");
+        }
+        finally
+        {
+            OS.RemoveLogger(osLogger);
+        }
+
+        AssertThat(sink.Entries.Count(e => e.Message.Contains($"app-info-{marker}"))).IsEqual(1);
+        AssertThat(sink.Entries.Count(e => e.Message.Contains($"app-error-{marker}"))).IsEqual(1);
     }
 
     [TestCase]
@@ -86,13 +144,7 @@ public partial class EngineErrorRoutingTest
         var marker = Guid.NewGuid().ToString("N");
         var sink = new MemorySink();
 
-        using (var factory = LoggerFactory.Create(logging =>
-               {
-                   logging.SetMinimumLevel(LogLevel.Trace);
-                   logging.AddFilter("Godot.Output", LogLevel.None);
-                   logging.AddZLoggerGodotDebug(o => o.EPluginIntegration = false);
-                   logging.AddZLoggerLogProcessor(sink);
-               }))
+        using (var factory = CreateFactory(sink, filter: logging => logging.AddFilter("Godot.Output", LogLevel.None)))
         {
             factory.CreateLogger("warmup");
 
@@ -101,37 +153,21 @@ public partial class EngineErrorRoutingTest
         }
 
         // Splitting engine messages by category is what makes the GD.Print mirror filterable on its own.
-        AssertThat(sink.Messages.Any(m => m.Contains($"engine-error-{marker}"))).IsTrue();
-        AssertThat(sink.Messages.Any(m => m.Contains($"engine-print-{marker}"))).IsFalse();
+        AssertThat(sink.Entries.Any(e => e.Message.Contains($"engine-error-{marker}"))).IsTrue();
+        AssertThat(sink.Entries.Any(e => e.Message.Contains($"engine-print-{marker}"))).IsFalse();
     }
 
-    sealed class MemorySink : IAsyncLogProcessor
-    {
-        readonly IZLoggerFormatter formatter = new ZLoggerOptions().CreateFormatter();
-        readonly List<string> messages = new();
-
-        public IReadOnlyList<string> Messages
+    static ILoggerFactory CreateFactory(MemorySink sink, Action<ZLoggerGodotDebugOptions>? configure = null,
+        Action<ILoggingBuilder>? filter = null) =>
+        LoggerFactory.Create(logging =>
         {
-            get
+            logging.SetMinimumLevel(LogLevel.Trace);
+            filter?.Invoke(logging);
+            logging.AddZLoggerGodotDebug(o =>
             {
-                lock (messages) return messages.ToArray();
-            }
-        }
-
-        public ValueTask DisposeAsync() => default;
-
-        public void Post(IZLoggerEntry log)
-        {
-            try
-            {
-                var writer = new ArrayBufferWriter<byte>();
-                formatter.FormatLogEntry(writer, log);
-                lock (messages) messages.Add(Encoding.UTF8.GetString(writer.WrittenSpan));
-            }
-            finally
-            {
-                log.Return();
-            }
-        }
-    }
+                o.EPluginIntegration = false;
+                configure?.Invoke(o);
+            });
+            logging.AddZLoggerLogProcessor(sink);
+        });
 }
