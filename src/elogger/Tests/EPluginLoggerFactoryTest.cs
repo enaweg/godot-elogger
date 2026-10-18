@@ -1,5 +1,3 @@
-using System;
-using System.Collections.Generic;
 using GdUnit4;
 using Microsoft.Extensions.Logging;
 using static GdUnit4.Assertions;
@@ -12,7 +10,7 @@ public class EPluginLoggerFactoryTest
     [TestCase]
     public void CreateLogger_PassesCategoryToProviderAndWrapsResultInEPluginLogger()
     {
-        var provider = new RecordingLoggerProvider();
+        var provider = new LogRecorder();
         var sut = new EPluginLoggerFactory(provider);
 
         var result = sut.CreateLogger("MyCategory");
@@ -24,7 +22,7 @@ public class EPluginLoggerFactoryTest
     [TestCase]
     public void CreateLogger_CalledTwice_QueriesProviderEachTime()
     {
-        var provider = new RecordingLoggerProvider();
+        var provider = new LogRecorder();
         var sut = new EPluginLoggerFactory(provider);
 
         sut.CreateLogger("First");
@@ -33,30 +31,17 @@ public class EPluginLoggerFactoryTest
         AssertThat(provider.RequestedCategories).ContainsExactly("First", "Second");
     }
 
-    sealed class RecordingLoggerProvider : ILoggerProvider
+    [TestCase]
+    public void CreateLogger_ReturnsALoggerThatWritesThroughTheProvidersLogger()
     {
-        public List<string> RequestedCategories { get; } = new();
+        var provider = new LogRecorder();
+        var sut = new EPluginLoggerFactory(provider);
 
-        public ILogger CreateLogger(string categoryName)
-        {
-            RequestedCategories.Add(categoryName);
-            return new NoOpLogger();
-        }
+        sut.CreateLogger("First").Warn("from first");
+        sut.CreateLogger("Second").Error("from second");
 
-        public void Dispose()
-        {
-        }
-    }
-
-    sealed class NoOpLogger : ILogger
-    {
-        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
-
-        public bool IsEnabled(LogLevel logLevel) => true;
-
-        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
-            Func<TState, Exception?, string> formatter)
-        {
-        }
+        AssertThat(provider.Entries).ContainsExactly(
+            new RecordedLog("First", LogLevel.Warning, "from first"),
+            new RecordedLog("Second", LogLevel.Error, "from second"));
     }
 }

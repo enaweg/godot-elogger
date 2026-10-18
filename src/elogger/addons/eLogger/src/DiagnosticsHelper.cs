@@ -73,11 +73,7 @@ public static class DiagnosticsHelper
             if (mb.IsGenericMethod)
             {
                 sb.Append("<");
-                foreach (var item in mb.GetGenericArguments())
-                {
-                    sb.Append(BeautifyType(item, true));
-                }
-
+                sb.Append(string.Join(", ", mb.GetGenericArguments().Select(x => BeautifyType(x, true))));
                 sb.Append(">");
             }
 
