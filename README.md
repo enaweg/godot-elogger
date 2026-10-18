@@ -67,7 +67,7 @@ subclasses `Godot.Logger`, which was first exposed to scripting in 4.5.
 
 ## Installation
 
-1. Download the latest [eLogger release](https://github.com/enaweg/godot-elogger/releases) and [ePlugin release](https://github.com/enaweg/godot-epluginframework/releases).
+1. Download eLogger and ePlugin, either from the Godot Asset Store ([eLogger](https://store.godotengine.org/asset/enaweg/elogger/), [ePlugin](https://store.godotengine.org/asset/enaweg/eplugin-framework/)) or from GitHub ([eLogger releases](https://github.com/enaweg/godot-elogger/releases), [ePlugin releases](https://github.com/enaweg/godot-epluginframework/releases)).
 2. Extract `addons/eLogger` and `addons/ePlugin` into your Godot project's `addons` directory. eLogger depends on ePlugin.
 3. Open the project in the Godot .NET editor and enable **ePlugin** and **eLogger** under **Project > Project Settings > Plugins**.
 
