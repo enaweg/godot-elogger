@@ -37,6 +37,14 @@ jobs:
         working-directory: src/elogger
         run: dotnet build eLogger.sln --configuration Debug
 
+      # Exported games compile without TOOLS, so editor-only ePlugin code is absent there. The Debug build above
+      # cannot catch a runtime source that still depends on it.
+      - name: Build exported game configurations
+        working-directory: src/elogger
+        run: |
+          dotnet build eLogger.sln --configuration ExportDebug
+          dotnet build eLogger.sln --configuration ExportRelease
+
       - name: Rebuild Godot project cache
         working-directory: src/elogger
         run: |
