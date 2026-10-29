@@ -5,7 +5,10 @@ using System.Diagnostics;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+#if TOOLS
+// ePlugin's internals are editor-only, so the namespace does not exist in an exported game build.
 using Enaweg.Plugin.Internal;
+#endif
 using Godot;
 using Godot.Collections;
 using Microsoft.Extensions.DependencyInjection;
