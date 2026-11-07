@@ -44,7 +44,7 @@ To run a single test suite, pass it as an extra argument to the script; extra ar
 ./addons/gdUnit4/runtest.sh --godot_binary /path/to/godot -a res://Tests/GodotOSLoggerTest.cs
 ```
 
-Tests live in `src/elogger/Tests/`. gdUnit4 discovers them there via `[gdunit4] settings/test/test_lookup_folder` in `project.godot`. C# test support comes from the `gdUnit4.api` and `gdUnit4.test.adapter` NuGet packages plus the vendored gdUnit4 addon (v6.2.2).
+Tests live in `src/elogger/Tests/`. gdUnit4 discovers them there via `[gdunit4] settings/test/test_lookup_folder` in `project.godot`. C# test support comes from the `gdUnit4.api` and `gdUnit4.test.adapter` NuGet packages plus the vendored gdUnit4 addon (v6.2.3).
 
 ## Architecture
 
