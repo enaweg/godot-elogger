@@ -94,6 +94,7 @@ Register the Godot provider on an `ILoggingBuilder`, for example in a `Microsoft
 
 ```csharp
 using Microsoft.Extensions.Logging;
+using ZLogger;
 using Enaweg.Logger;
 
 using var factory = LoggerFactory.Create(logging =>
@@ -109,6 +110,10 @@ using var factory = LoggerFactory.Create(logging =>
 var logger = factory.CreateLogger("MyGame");
 logger.ZLogInformation($"Player spawned at {position}");
 ```
+
+Keep the factory alive for as long as you log, for example in an autoload that creates it in `_EnterTree` and disposes
+it in `_ExitTree`. Disposing it also removes the provider's engine interceptor, so a `using var` inside a method such
+as `_Ready` stops feeding engine messages into ZLogger as soon as that method returns.
 
 Log levels are routed as follows:
 

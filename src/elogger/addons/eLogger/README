@@ -13,18 +13,33 @@ eLogger brings [url=https://github.com/Cysharp/ZLogger]ZLogger[/url], the zero-a
 [b]Where to start[/b]
 Add the Godot provider wherever you create your loggers, for example in an autoload:
 
-[code]using Microsoft.Extensions.Logging;
+[code]using Godot;
+using Microsoft.Extensions.Logging;
 using ZLogger;
 using Enaweg.Logger;
 
-using var factory = LoggerFactory.Create(logging =>
+public partial class Logging : Node
 {
-    logging.SetMinimumLevel(LogLevel.Trace);
-    logging.AddZLoggerGodotDebug();
-});
+    public static ILoggerFactory Factory { get; private set; } = null!;
 
-var logger = factory.CreateLogger("MyGame");
+    public override void _EnterTree()
+    {
+        Factory = LoggerFactory.Create(logging =>
+        {
+            logging.SetMinimumLevel(LogLevel.Trace);
+            logging.AddZLoggerGodotDebug();
+        });
+    }
+
+    public override void _ExitTree() => Factory.Dispose();
+}[/code]
+
+Then log from anywhere in your game:
+
+[code]var logger = Logging.Factory.CreateLogger("MyGame");
 logger.ZLogInformation($"Player spawned at {position}");[/code]
+
+Keep the factory for as long as you log. Disposing it also stops feeding engine messages into ZLogger, so do not create it with [code]using var[/code] inside a method such as [code]_Ready[/code].
 
 Formatters, JSON output, filters and other sinks such as [code]AddZLoggerFile[/code] are configured as in plain ZLogger. Use [code]logging.AddFilter("Godot.Output", LogLevel.None)[/code] to stop mirroring [code]GD.Print[/code].
 
