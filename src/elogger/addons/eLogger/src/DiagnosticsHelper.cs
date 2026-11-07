@@ -217,8 +217,35 @@ public static class DiagnosticsHelper
         }
 
         var root = applicationDataPath ??= ProjectSettings.GlobalizePath("res://");
-        var href = fi.FullName.Replace(Path.DirectorySeparatorChar, '/').Replace(root, "res://");
+        var href = ToResPath(fi.FullName, root);
         return $"{href}:{line}";
         // return "<a href=\"" + href + "\" line=\"" + line + "\">" + href + ":" + line + "</a>";
+    }
+
+    /// <summary>
+    /// Maps a source file inside the project onto its <c>res://</c> path. Files elsewhere keep their full path, with
+    /// forward slashes.
+    /// </summary>
+    internal static string ToResPath(string fullPath, string projectRoot)
+    {
+        var path = fullPath.Replace(Path.DirectorySeparatorChar, '/');
+
+        // GlobalizePath("res://") does not resolve to a directory in an exported game, where the result can be empty.
+        // string.Replace throws on an empty search string, which would fail the log statement that is being written.
+        if (string.IsNullOrEmpty(projectRoot))
+        {
+            return path;
+        }
+
+        if (!projectRoot.EndsWith('/'))
+        {
+            projectRoot += "/";
+        }
+
+        // Only a leading match is the project; the drive letter's case can differ between PDB paths and Godot's.
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        return path.StartsWith(projectRoot, comparison)
+            ? string.Concat("res://", path.AsSpan(projectRoot.Length))
+            : path;
     }
 }
