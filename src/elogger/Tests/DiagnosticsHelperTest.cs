@@ -97,6 +97,34 @@ public class DiagnosticsHelperTest
         AssertThat(Regex.IsMatch(result, @"\(at res://Tests/DiagnosticsHelperTest\.cs:\d+\)")).IsTrue();
     }
 
+    [TestCase]
+    public void ToResPath_MapsFilesInsideTheProject()
+    {
+        var root = "/home/dev/game/";
+
+        AssertThat(DiagnosticsHelper.ToResPath("/home/dev/game/Scripts/Player.cs", root))
+            .IsEqual("res://Scripts/Player.cs");
+        AssertThat(DiagnosticsHelper.ToResPath("/home/dev/game/Scripts/Player.cs", "/home/dev/game"))
+            .IsEqual("res://Scripts/Player.cs");
+    }
+
+    [TestCase]
+    public void ToResPath_WithAnEmptyProjectRoot_KeepsThePath()
+    {
+        // GlobalizePath("res://") can be empty in an exported game; string.Replace used to throw on it.
+        AssertThat(DiagnosticsHelper.ToResPath("/build/src/Scripts/Player.cs", ""))
+            .IsEqual("/build/src/Scripts/Player.cs");
+    }
+
+    [TestCase]
+    public void ToResPath_OnlyMapsALeadingMatch()
+    {
+        AssertThat(DiagnosticsHelper.ToResPath("/home/dev/other/home/dev/game/Player.cs", "/home/dev/game/"))
+            .IsEqual("/home/dev/other/home/dev/game/Player.cs");
+        AssertThat(DiagnosticsHelper.ToResPath("/home/dev/game2/Player.cs", "/home/dev/game/"))
+            .IsEqual("/home/dev/game2/Player.cs");
+    }
+
     [MethodImpl(MethodImplOptions.NoInlining)]
     static string CaptureStackTraceFrom(int value, string text) =>
         DiagnosticsHelper.CleanupStackTrace(new StackTrace(true));
