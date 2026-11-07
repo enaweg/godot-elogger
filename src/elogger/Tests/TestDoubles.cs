@@ -175,6 +175,15 @@ internal sealed class FakeEPluginLoggingHost : IEPluginLoggingHost
         // Like EGlobal.SwitchLogging, which creates ePlugin's loggers right away - during the provider's constructor,
         // while the application's logger factory is still being built.
         Logger = loggerFactory.CreateLogger("Enaweg.Plugin.EPluginPlugin");
+
+        // EGlobal can fail after it switched part of its logging, e.g. while it sets up the dotnet CLI.
+        if (FailWith is { } failure)
+        {
+            throw failure;
+        }
     }
+
+    /// <summary>Thrown by <see cref="SwitchLogging" /> after it recorded the switch.</summary>
+    public Exception? FailWith { get; set; }
 }
 #endif

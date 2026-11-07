@@ -238,6 +238,30 @@ public partial class ZLoggerGodotDebugLoggerProviderTest
                 ("Enaweg.Plugin.Noisy", $"noisy-warning-{marker}"));
     }
 
+    [TestCase]
+    public void Provider_WhenEPluginFailsToSwitch_StillLogsAndHandsBackOnDispose()
+    {
+        var marker = Guid.NewGuid().ToString("N");
+        var host = new FakeEPluginLoggingHost { FailWith = new InvalidOperationException("dotnet is missing") };
+        var application = new LogRecorder();
+        WithEPluginLoggingSwitch(new EPluginLoggingSwitch(host), () =>
+        {
+            // A failing ePlugin must not fail the provider, or the application could not log at all - and before
+            // the engine logger was registered last, it also stayed registered for a provider nobody could dispose.
+            var provider = new ZLoggerGodotDebugLoggerProvider(new ZLoggerGodotDebugOptions(),
+                new FlakyServiceProvider(application, failures: 0));
+            host.FailWith = null;
+
+            GD.PushError($"engine-error-{marker}");
+            provider.Dispose();
+            GD.PushError($"after-dispose-{marker}");
+        });
+
+        AssertThat(application.Entries.Where(e => e.Message.Contains(marker)).Select(e => e.Message))
+            .ContainsExactly($"engine-error-{marker}");
+        AssertObject(host.Current).IsInstanceOf<Enaweg.Plugin.Logging.GenericLoggerFactory>();
+    }
+
     static void WithEPluginLoggingSwitch(EPluginLoggingSwitch ePluginLogging, Action action)
     {
         var global = EPluginLoggingSwitch.Global;

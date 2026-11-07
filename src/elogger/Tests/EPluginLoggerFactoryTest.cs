@@ -1,3 +1,4 @@
+using System;
 using GdUnit4;
 using Microsoft.Extensions.Logging;
 using static GdUnit4.Assertions;
@@ -150,6 +151,21 @@ public class EPluginLoggingSwitchTest
         sut.HandBack(new EPluginLoggerFactory(new LogRecorder()));
 
         AssertThat(host.Switches.Count).IsEqual(2);
+    }
+
+    [TestCase]
+    public void TakeOver_WhenEPluginThrows_StillHandsBack()
+    {
+        var host = new FakeEPluginLoggingHost { FailWith = new InvalidOperationException("dotnet is missing") };
+        var sut = new EPluginLoggingSwitch(host);
+        var factory = new EPluginLoggerFactory(new LogRecorder());
+
+        AssertThrown(() => sut.TakeOver(factory)).IsInstanceOf<InvalidOperationException>();
+        host.FailWith = null;
+
+        // ePlugin may already log through the factory, so it must be restored like any other owner's.
+        sut.HandBack(factory);
+        AssertObject(host.Current).IsInstanceOf<Enaweg.Plugin.Logging.GenericLoggerFactory>();
     }
 
     [TestCase]

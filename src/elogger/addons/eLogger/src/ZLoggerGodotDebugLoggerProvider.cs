@@ -227,7 +227,6 @@ public class ZLoggerGodotDebugLoggerProvider : ILoggerProvider, ISupportExternal
 
         var loggerAccessor = CreateEngineLoggerAccessor(serviceProvider);
         godotLogger = new GodotOSLogger(loggerAccessor, options.EngineCategoryPrefix);
-        OS.AddLogger(godotLogger);
 
         if (options.EPluginIntegration)
         {
@@ -238,13 +237,28 @@ public class ZLoggerGodotDebugLoggerProvider : ILoggerProvider, ISupportExternal
             // honour its filters rather than only being printed by this provider.
             var ePluginFactory = new EPluginLoggerFactory(loggerAccessor);
             var ePluginSwitch = EPluginLoggingSwitch.Global;
-            if (ePluginSwitch.TakeOver(ePluginFactory))
+            try
             {
+                if (ePluginSwitch.TakeOver(ePluginFactory))
+                {
+                    ePluginLogging = ePluginSwitch;
+                    ePluginLoggerFactory = ePluginFactory;
+                }
+            }
+            catch (Exception e)
+            {
+                // A problem in ePlugin must not stop the application from logging. ePlugin may have switched part of
+                // its logging before it failed, so this provider still hands it back when it is disposed.
                 ePluginLogging = ePluginSwitch;
                 ePluginLoggerFactory = ePluginFactory;
+                GD.PushWarning($"eLogger could not switch ePlugin's logging: {e.Message}");
             }
 #endif
         }
+
+        // Registered last: once the engine holds the logger, only Dispose removes it again, so a constructor that
+        // threw after this point would leave it capturing engine messages for a provider nobody can dispose.
+        OS.AddLogger(godotLogger);
     }
 
     /// <summary>
