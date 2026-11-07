@@ -1,7 +1,6 @@
 using System;
 using System.Buffers;
 using System.Collections.Concurrent;
-using System.Diagnostics;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -11,6 +10,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using ZLogger;
+using ZLogger.Formatters;
 using Environment = System.Environment;
 using ILogger = Microsoft.Extensions.Logging.ILogger;
 
@@ -18,6 +18,11 @@ namespace Enaweg.Logger;
 
 public sealed class ZLoggerGodotDebugOptions : ZLoggerOptions
 {
+    /// <summary>
+    /// Print logged exceptions with cleaned-up stack traces that link to <c>res://</c> paths. The plain-text
+    /// formatter's exception output is replaced by this, so a custom exception formatter set through
+    /// <c>UsePlainTextFormatter</c> only applies when this is <c>false</c>.
+    /// </summary>
     public bool PrettyStacktrace { get; set; } = true;
     public bool EPluginIntegration { get; set; } = true;
 
@@ -65,6 +70,14 @@ public class GodotDebugLogProcessor : IAsyncLogProcessor
     {
         this.options = options;
         formatter = options.CreateFormatter();
+
+        // The plain-text formatter appends exception.ToString(), so the trace would be printed twice: raw by the
+        // formatter, then cleaned up by Post. Leave the exception to Post. Every CreateFormatter call returns a new
+        // instance, so this does not affect other processors built from the same options.
+        if (options.PrettyStacktrace && formatter is PlainTextZLoggerFormatter plainText)
+        {
+            plainText.SetExceptionFormatter(static (_, _) => { });
+        }
     }
 
     public ValueTask DisposeAsync()
@@ -79,16 +92,20 @@ public class GodotDebugLogProcessor : IAsyncLogProcessor
             var context = log.LogInfo.Context as GodotObject;
             var msg = FormatToString(log, formatter);
 
-            if (log.LogInfo.Exception is not null && options.PrettyStacktrace)
+            if (log.LogInfo.Exception is { } exception && options.PrettyStacktrace)
             {
-                var stacktrace = new StackTrace(log.LogInfo.Exception, true);
                 msg =
-                    $"{msg}{Environment.NewLine}{DiagnosticsHelper.CleanupStackTrace(stacktrace)}{Environment.NewLine}---";
+                    $"{msg}{Environment.NewLine}{DiagnosticsHelper.CleanupException(exception)}{Environment.NewLine}---";
             }
 
             if (context is not null)
             {
-                msg = $"(#{context.GetInstanceId()}) {msg}";
+                // A context can be logged after its native object was freed, e.g. from an async continuation after
+                // QueueFree. GetInstanceId would throw ObjectDisposedException then, and the logging pipeline would
+                // re-throw it into the code that logged.
+                msg = GodotObject.IsInstanceValid(context)
+                    ? $"(#{context.GetInstanceId()}) {msg}"
+                    : $"(#freed) {msg}";
             }
 
             using var _ = GodotLogGuard.Enter();
@@ -189,6 +206,11 @@ internal sealed partial class GodotOSLogger : Godot.Logger
         {
             return;
         }
+
+        // Godot hands over printed text with its line break attached. Sinks end every entry themselves, so keeping it
+        // would add a blank line after each mirrored GD.Print. Reassigned rather than copied into a new local so the
+        // structured parameter keeps its "message" name. TrimEnd returns the same instance when there is nothing to trim.
+        message = message.TrimEnd('\r', '\n');
 
         var logger = loggerAccessor(outputCategory);
         if (error)
