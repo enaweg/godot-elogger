@@ -39,6 +39,41 @@ public static class DiagnosticsHelper
     static string? applicationDataPath;
     static bool displayFilenames = true;
 
+    /// <summary>
+    /// Formats an exception like <see cref="Exception.ToString" /> - type, message and inner exceptions - but with
+    /// cleaned-up stack traces. Inner exceptions follow their outer exception, each introduced by <c>---&gt;</c>.
+    /// </summary>
+    public static string CleanupException(Exception exception)
+    {
+        var sb = new StringBuilder();
+        AppendException(sb, exception, false);
+        return sb.ToString();
+    }
+
+    static void AppendException(StringBuilder sb, Exception exception, bool isInner)
+    {
+        if (isInner)
+        {
+            sb.Append("---> ");
+        }
+
+        sb.Append(exception.GetType().FullName).Append(": ").AppendLine(exception.Message);
+        sb.Append(CleanupStackTrace(new StackTrace(exception, true)));
+
+        // An AggregateException's InnerException is only the first of its inner exceptions.
+        if (exception is AggregateException aggregate)
+        {
+            foreach (var inner in aggregate.InnerExceptions)
+            {
+                AppendException(sb, inner, true);
+            }
+        }
+        else if (exception.InnerException is { } inner)
+        {
+            AppendException(sb, inner, true);
+        }
+    }
+
     public static string CleanupStackTrace(StackTrace stackTrace)
     {
         var sb = new StringBuilder();

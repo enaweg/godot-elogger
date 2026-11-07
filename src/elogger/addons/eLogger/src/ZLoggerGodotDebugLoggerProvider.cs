@@ -1,7 +1,6 @@
 using System;
 using System.Buffers;
 using System.Collections.Concurrent;
-using System.Diagnostics;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -15,6 +14,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using ZLogger;
+using ZLogger.Formatters;
 using Environment = System.Environment;
 using ILogger = Microsoft.Extensions.Logging.ILogger;
 
@@ -22,6 +22,11 @@ namespace Enaweg.Logger;
 
 public sealed class ZLoggerGodotDebugOptions : ZLoggerOptions
 {
+    /// <summary>
+    /// Print logged exceptions with cleaned-up stack traces that link to <c>res://</c> paths. The plain-text
+    /// formatter's exception output is replaced by this, so a custom exception formatter set through
+    /// <c>UsePlainTextFormatter</c> only applies when this is <c>false</c>.
+    /// </summary>
     public bool PrettyStacktrace { get; set; } = true;
     public bool EPluginIntegration { get; set; } = true;
 
@@ -69,6 +74,14 @@ public class GodotDebugLogProcessor : IAsyncLogProcessor
     {
         this.options = options;
         formatter = options.CreateFormatter();
+
+        // The plain-text formatter appends exception.ToString(), so the trace would be printed twice: raw by the
+        // formatter, then cleaned up by Post. Leave the exception to Post. Every CreateFormatter call returns a new
+        // instance, so this does not affect other processors built from the same options.
+        if (options.PrettyStacktrace && formatter is PlainTextZLoggerFormatter plainText)
+        {
+            plainText.SetExceptionFormatter(static (_, _) => { });
+        }
     }
 
     public ValueTask DisposeAsync()
@@ -83,11 +96,10 @@ public class GodotDebugLogProcessor : IAsyncLogProcessor
             var context = log.LogInfo.Context as GodotObject;
             var msg = FormatToString(log, formatter);
 
-            if (log.LogInfo.Exception is not null && options.PrettyStacktrace)
+            if (log.LogInfo.Exception is { } exception && options.PrettyStacktrace)
             {
-                var stacktrace = new StackTrace(log.LogInfo.Exception, true);
                 msg =
-                    $"{msg}{Environment.NewLine}{DiagnosticsHelper.CleanupStackTrace(stacktrace)}{Environment.NewLine}---";
+                    $"{msg}{Environment.NewLine}{DiagnosticsHelper.CleanupException(exception)}{Environment.NewLine}---";
             }
 
             if (context is not null)
