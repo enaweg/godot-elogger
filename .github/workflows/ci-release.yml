@@ -71,22 +71,21 @@ jobs:
           # released plugin.cfg is a prerelease to the ePlugin updater as well.
           echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
 
-      - name: Set Version to plugin.cfg
-        shell: bash
-        run: |
-          sed -i "s/version=\".*\"/version=\"${{ env.VERSION }}\"/g" src/elogger/addons/eLogger/plugin.cfg
-
-      - name: Deactivate plugin for distribution
-        shell: bash
-        run: |
-          mv src/elogger/addons/eLogger/src src/elogger/addons/eLogger/.src
-
+      # Writes the version into plugin.cfg, hides src as .src again and zips addons/eLogger as the release asset.
       - name: Create artifact
         shell: bash
+        run: bash .github/scripts/package-addon.sh "out/eLogger-v${VERSION}.zip" "${VERSION}"
+
+      # Builds the asset in a fresh project, as installed and as enabled, against the oldest supported Godot and the
+      # pinned one, so a release that does not compile for its users is never published.
+      - name: Build a consumer project from the artifact
+        shell: bash
+        env:
+          # The oldest Godot eLogger supports (see CLAUDE.md): Godot.Logger was first exposed to scripting in 4.5.
+          MIN_GODOT_VERSION: 4.5.0
         run: |
-          mkdir out/
-          cd src/elogger
-          zip -r ../../out/eLogger-v${VERSION}.zip addons/eLogger
+          pinned="$(sed -n 's|.*Godot\.NET\.Sdk/\([^"]*\)".*|\1|p' src/elogger/eLogger.csproj)"
+          bash .github/scripts/check-consumer-build.sh "out/eLogger-v${VERSION}.zip" "$MIN_GODOT_VERSION" "$pinned"
 
       - name: Build Changelog
         id: build_changelog
