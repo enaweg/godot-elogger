@@ -225,7 +225,8 @@ public class ZLoggerGodotDebugLoggerProvider : ILoggerProvider, ISupportExternal
         this.options = options;
         this.processor = new GodotDebugLogProcessor(options);
 
-        godotLogger = new GodotOSLogger(CreateEngineLoggerAccessor(serviceProvider), options.EngineCategoryPrefix);
+        var loggerAccessor = CreateEngineLoggerAccessor(serviceProvider);
+        godotLogger = new GodotOSLogger(loggerAccessor, options.EngineCategoryPrefix);
         OS.AddLogger(godotLogger);
 
         if (options.EPluginIntegration)
@@ -233,7 +234,9 @@ public class ZLoggerGodotDebugLoggerProvider : ILoggerProvider, ISupportExternal
 #if TOOLS
             // ePlugin only exists while the editor is running its plugins; in a game build the integration is
             // compiled out, and in a game run from the editor TakeOver finds no ePlugin and switches nothing.
-            var ePluginFactory = new EPluginLoggerFactory(this);
+            // Like engine messages, ePlugin's go through the application's factory, so they reach every sink and
+            // honour its filters rather than only being printed by this provider.
+            var ePluginFactory = new EPluginLoggerFactory(loggerAccessor);
             var ePluginSwitch = EPluginLoggingSwitch.Global;
             if (ePluginSwitch.TakeOver(ePluginFactory))
             {
@@ -245,9 +248,10 @@ public class ZLoggerGodotDebugLoggerProvider : ILoggerProvider, ISupportExternal
     }
 
     /// <summary>
-    /// Builds the accessor that maps an engine message category onto the logger it is written to.
+    /// Builds the accessor that maps a category of engine messages, or of ePlugin's messages, onto the logger it is
+    /// written to.
     /// <para>
-    /// Engine messages belong in every sink the application configured, not just this provider's, so loggers are
+    /// These messages belong in every sink the application configured, not just this provider's, so loggers are
     /// taken from the application's <see cref="ILoggerFactory" /> when one is reachable. That resolution has to
     /// happen lazily: the factory depends on every <see cref="ILoggerProvider" />, so it cannot be resolved while
     /// this provider is still being constructed. When the provider is built by hand there is no service provider

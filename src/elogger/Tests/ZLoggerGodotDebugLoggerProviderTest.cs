@@ -209,6 +209,35 @@ public partial class ZLoggerGodotDebugLoggerProviderTest
         });
     }
 
+    [TestCase]
+    public void EPluginMessages_ReachOtherSinksAndHonourFilters()
+    {
+        var marker = Guid.NewGuid().ToString("N");
+        var host = new FakeEPluginLoggingHost();
+        var sink = new MemorySink();
+        WithEPluginLoggingSwitch(new EPluginLoggingSwitch(host), () =>
+        {
+            using var factory = LoggerFactory.Create(logging =>
+            {
+                logging.SetMinimumLevel(LogLevel.Trace);
+                logging.AddFilter("Enaweg.Plugin.Noisy", LogLevel.Warning);
+                logging.AddZLoggerGodotDebug();
+                logging.AddZLoggerLogProcessor(sink);
+            });
+
+            // ePlugin got this logger while the factory was still being built.
+            host.Logger!.Log($"framework-{marker}");
+            var noisy = host.Current!.CreateLogger("Enaweg.Plugin.Noisy");
+            noisy.Log($"noisy-info-{marker}");
+            noisy.Warn($"noisy-warning-{marker}");
+        });
+
+        AssertThat(sink.Entries.Where(e => e.Message.Contains(marker)).Select(e => (e.Category, e.Message)))
+            .ContainsExactly(
+                ("Enaweg.Plugin.EPluginPlugin", $"framework-{marker}"),
+                ("Enaweg.Plugin.Noisy", $"noisy-warning-{marker}"));
+    }
+
     static void WithEPluginLoggingSwitch(EPluginLoggingSwitch ePluginLogging, Action action)
     {
         var global = EPluginLoggingSwitch.Global;

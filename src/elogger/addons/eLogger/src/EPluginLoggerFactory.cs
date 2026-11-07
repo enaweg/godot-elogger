@@ -1,4 +1,5 @@
-﻿using Microsoft.Extensions.Logging;
+﻿using System;
+using Microsoft.Extensions.Logging;
 #if TOOLS
 using System.Collections.Generic;
 // ePlugin's internals are editor-only, so the namespace does not exist in an exported game build.
@@ -11,18 +12,23 @@ namespace Enaweg.Logger;
 
 public sealed class EPluginLoggerFactory : ILoggerFactory
 {
-    private readonly ILoggerProvider _loggerProvider;
+    private readonly Func<string, ILogger> _createLogger;
 
     public EPluginLoggerFactory(ILoggerProvider loggerProvider)
     {
-        _loggerProvider = loggerProvider;
+        _createLogger = category => new EPluginLogger(loggerProvider.CreateLogger(category));
     }
 
-    public ILogger CreateLogger(string category)
+    /// <summary>
+    /// Creates loggers that write through <paramref name="loggerAccessor" />, which maps a category onto a logger of
+    /// the application. The accessor runs for every message (see <see cref="EPluginLogger" />), so it must not throw.
+    /// </summary>
+    internal EPluginLoggerFactory(Func<string, Microsoft.Extensions.Logging.ILogger> loggerAccessor)
     {
-        var logger = _loggerProvider.CreateLogger(category);
-        return new EPluginLogger(logger);
+        _createLogger = category => new EPluginLogger(category, loggerAccessor);
     }
+
+    public ILogger CreateLogger(string category) => _createLogger(category);
 }
 
 #if TOOLS

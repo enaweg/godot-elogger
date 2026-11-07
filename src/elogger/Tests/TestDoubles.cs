@@ -166,6 +166,15 @@ internal sealed class FakeEPluginLoggingHost : IEPluginLoggingHost
 
     public Enaweg.Plugin.Logging.ILoggerFactory? Current => switches.Count > 0 ? switches[^1] : null;
 
-    public void SwitchLogging(Enaweg.Plugin.Logging.ILoggerFactory loggerFactory) => switches.Add(loggerFactory);
+    /// <summary>The logger ePlugin itself got from the last switch.</summary>
+    public Enaweg.Plugin.Logging.ILogger? Logger { get; private set; }
+
+    public void SwitchLogging(Enaweg.Plugin.Logging.ILoggerFactory loggerFactory)
+    {
+        switches.Add(loggerFactory);
+        // Like EGlobal.SwitchLogging, which creates ePlugin's loggers right away - during the provider's constructor,
+        // while the application's logger factory is still being built.
+        Logger = loggerFactory.CreateLogger("Enaweg.Plugin.EPluginPlugin");
+    }
 }
 #endif

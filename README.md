@@ -85,7 +85,7 @@ Enabling eLogger adds the required `ZLogger` and `ZString` NuGet packages to the
 + Cleans up exception stack traces: ZLogger and `Microsoft.Extensions.Logging` frames are dropped, types are printed in C# notation, and source locations are rewritten to `res://` paths with line numbers.
 + Configured through `ZLoggerGodotDebugOptions`, which derives from `ZLoggerOptions` — custom formatters, JSON output, timestamps, and `IncludeScopes` all work as they do in plain ZLogger. The provider implements `ISupportExternalScope`, so `BeginScope` state flows through. It is registered under the `ZLoggerGodotDebug` provider alias for configuration-driven filtering.
 + Guards against double logging: output the plugin itself writes to Godot is not re-captured by the engine interceptor and logged a second time.
-+ Optional integration with [ePlugin](https://github.com/enaweg/godot-epluginframework) logging (on by default), so plugin lifecycle messages are handled by ZLogger too. It is skipped automatically outside the editor, where ePlugin is not running.
++ Optional integration with [ePlugin](https://github.com/enaweg/godot-epluginframework) logging (on by default), so plugin lifecycle messages are handled by ZLogger too. Like engine messages they reach every configured sink, under the plugin's type name as category, so standard category filters apply. Disposing the provider hands ePlugin's logging back. It is skipped automatically outside the editor, where ePlugin is not running.
 + Uses the [ePlugin Framework](https://github.com/enaweg/godot-epluginframework) to manage NuGet packages and runtime source files when the plugin is enabled.
 
 ## Examples

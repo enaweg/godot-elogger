@@ -44,6 +44,20 @@ public class EPluginLoggerFactoryTest
             new RecordedLog("First", LogLevel.Warning, "from first"),
             new RecordedLog("Second", LogLevel.Error, "from second"));
     }
+
+    [TestCase]
+    public void WithALoggerAccessor_CreateLogger_ResolvesNothingUntilAMessageIsLogged()
+    {
+        var recorder = new LogRecorder();
+        var sut = new EPluginLoggerFactory(recorder.CreateLogger);
+
+        var logger = sut.CreateLogger("MyCategory");
+        AssertThat(recorder.RequestedCategories).IsEmpty();
+
+        logger.Warn("careful");
+
+        AssertThat(recorder.Entries).ContainsExactly(new RecordedLog("MyCategory", LogLevel.Warning, "careful"));
+    }
 }
 
 #if TOOLS

@@ -51,4 +51,27 @@ public class EPluginLoggerTest
 
         AssertThat(recorder.Entries[0].Message).IsEqual("installed {Package} into {0} at C:\\{dir}");
     }
+
+    [TestCase]
+    public void WithALoggerAccessor_ResolvesTheLoggerForEveryMessage()
+    {
+        var recorder = new LogRecorder();
+        var requests = 0;
+        var sut = new EPluginLogger("ePlugin", category =>
+        {
+            requests++;
+            return recorder.CreateLogger(category);
+        });
+
+        // ePlugin creates its loggers before the application's factory is ready, so nothing is resolved up front.
+        AssertThat(requests).IsEqual(0);
+
+        sut.Log("first");
+        sut.Error("second");
+
+        AssertThat(requests).IsEqual(2);
+        AssertThat(recorder.Entries).ContainsExactly(
+            new RecordedLog("ePlugin", LogLevel.Information, "first"),
+            new RecordedLog("ePlugin", LogLevel.Error, "second"));
+    }
 }
