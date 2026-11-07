@@ -13,7 +13,7 @@
 ![Dotnet 8](https://img.shields.io/badge/8-02020?logo=dotnet&logoSize=auto&logoColor=purple&color=darkgreen&labelColor=E0E0E0)
 ![Dotnet 10](https://img.shields.io/badge/10-02020?logo=dotnet&logoSize=auto&logoColor=purple&color=darkgreen&labelColor=E0E0E0)
 
-![ZLogger 2.5](https://img.shields.io/badge/ZLogger-v2.5-202020?color=darkgreen&labelColor=202020)
+![ZLogger 2.5](https://img.shields.io/badge/ZLogger-v2.6-202020?color=darkgreen&labelColor=202020)
 
 **NOTE**: This project is experimental and still a work in progress.
 
@@ -75,13 +75,15 @@ subclasses `Godot.Logger`, which was first exposed to scripting in 4.5.
 
 Enabling eLogger adds the required `ZLogger` and `ZString` NuGet packages to the project and exposes the plugin's runtime source directory. No manual `dotnet add package` command is needed. A welcome page with first steps is shown once after eLogger is enabled, and new eLogger releases are offered in the ePlugin Manager.
 
+Disabling eLogger removes the packages again and hides its runtime source directory, so game code that uses eLogger no longer compiles until the plugin is enabled again.
+
 ## Features
 
 + [ZLogger](https://github.com/Cysharp/ZLogger) integration for Godot: zero-allocation structured logging through `Microsoft.Extensions.Logging`.
 + Routes log messages to Godot's output panel and error/warning overlays — `GD.Print` for informational levels, `GD.PushWarning` and `GD.PushError` for warnings and errors, so they show up in the editor's Debugger dock.
 + Captures native engine diagnostics — engine errors and warnings, script errors, shader errors, and everything printed through `GD.Print` / `GD.PrintErr` — and feeds them back through ZLogger, so engine output reaches the file, JSON, or network sinks you configured rather than only the editor console.
 + Logs intercepted engine messages under a category per diagnostic type (`Godot.Engine`, `Godot.Script`, `Godot.Shader`, `Godot.Output`), so standard `AddFilter` rules can silence or level-limit one kind or all of them. The prefix is configurable.
-+ Prefixes a message with the emitting object's instance ID when the log entry carries a `GodotObject` as its ZLogger context.
++ Prefixes a message with the emitting object's instance ID (`(#1234)`) when the log entry carries a `GodotObject` as its ZLogger context, or with `(#freed)` when that object has already been freed.
 + Cleans up exception stack traces: ZLogger and `Microsoft.Extensions.Logging` frames are dropped, types are printed in C# notation, and source locations are rewritten to `res://` paths with line numbers.
 + Configured through `ZLoggerGodotDebugOptions`, which derives from `ZLoggerOptions` — custom formatters, JSON output, timestamps, and `IncludeScopes` all work as they do in plain ZLogger. The provider implements `ISupportExternalScope`, so `BeginScope` state flows through. It is registered under the `ZLoggerGodotDebug` provider alias for configuration-driven filtering.
 + Guards against double logging: output the plugin itself writes to Godot is not re-captured by the engine interceptor and logged a second time.
@@ -90,30 +92,53 @@ Enabling eLogger adds the required `ZLogger` and `ZString` NuGet packages to the
 
 ## Examples
 
-Register the Godot provider on an `ILoggingBuilder`, for example in a `Microsoft.Extensions.Logging.LoggerFactory` or your dependency-injection setup:
+Register the Godot provider on an `ILoggingBuilder`, for example in a `Microsoft.Extensions.Logging.LoggerFactory` or
+your dependency-injection setup. An autoload is a good home for the factory:
 
 ```csharp
+using Godot;
 using Microsoft.Extensions.Logging;
 using ZLogger;
 using Enaweg.Logger;
 
-using var factory = LoggerFactory.Create(logging =>
+public partial class Logging : Node
 {
-    logging.SetMinimumLevel(LogLevel.Trace);
-    logging.AddZLoggerGodotDebug(options =>
-    {
-        options.PrettyStacktrace = true;   // clean up exception stack traces
-        options.EPluginIntegration = true; // route ePlugin logs through ZLogger
-    });
-});
+    public static ILoggerFactory Factory { get; private set; } = null!;
 
-var logger = factory.CreateLogger("MyGame");
+    public override void _EnterTree()
+    {
+        Factory = LoggerFactory.Create(logging =>
+        {
+            logging.SetMinimumLevel(LogLevel.Trace);
+            logging.AddZLoggerGodotDebug(options =>
+            {
+                options.PrettyStacktrace = true;   // clean up exception stack traces
+                options.EPluginIntegration = true; // route ePlugin logs through ZLogger
+            });
+        });
+    }
+
+    public override void _ExitTree() => Factory.Dispose();
+}
+```
+
+Then log from anywhere in your game:
+
+```csharp
+var logger = Logging.Factory.CreateLogger("MyGame");
 logger.ZLogInformation($"Player spawned at {position}");
 ```
 
-Keep the factory alive for as long as you log, for example in an autoload that creates it in `_EnterTree` and disposes
-it in `_ExitTree`. Disposing it also removes the provider's engine interceptor, so a `using var` inside a method such
-as `_Ready` stops feeding engine messages into ZLogger as soon as that method returns.
+Keep the factory alive for as long as you log. Disposing it also removes the provider's engine interceptor, so a
+`using var` inside a method such as `_Ready` stops feeding engine messages into ZLogger as soon as that method returns.
+
+`ZLoggerGodotDebugOptions` derives from `ZLoggerOptions`, so every ZLogger option is available. eLogger adds:
+
+| Option | Default | Effect |
+|---|---|---|
+| `PrettyStacktrace` | `true` | Prints logged exceptions with cleaned-up stack traces that link to `res://` paths. It replaces the plain-text formatter's exception output, so a custom exception formatter set through `UsePlainTextFormatter` only applies when this is `false`. |
+| `EPluginIntegration` | `true` | Routes ePlugin's logging through ZLogger while the provider is alive (editor only). |
+| `EngineCategoryPrefix` | `"Godot"` | Root of the categories that intercepted engine messages are logged under (see below). |
 
 Log levels are routed as follows:
 
@@ -144,6 +169,16 @@ logging.AddFilter("Godot", LogLevel.Warning);        // quieten every engine mes
 
 Set `options.EngineCategoryPrefix` if `Godot` would collide with categories your application already uses.
 
+### Plain console output
+
+`GodotLogProcessor` is a simpler alternative to the debug provider: it prints every level to the Output panel with a
+level prefix (`TRACE:`, `DEBUG:`, `WARN:`, …), using `GD.PrintErr` for errors, and does not push to the Debugger,
+capture engine messages or integrate with ePlugin. Register it as a plain ZLogger log processor:
+
+```csharp
+logging.AddZLoggerLogProcessor(options => new GodotLogProcessor(options));
+```
+
 ## Testing
 
 The current CI configuration builds and tests pull requests with Godot 4.7.2 and .NET 8.
@@ -157,15 +192,21 @@ To build and run the tests locally:
 cd src/elogger
 export GODOT_BIN=/path/to/godot
 dotnet build "eLogger.sln" --configuration Debug
+"$GODOT_BIN" --path . --editor --headless --quit-after 2000   # fresh clone only: build Godot's project cache
 dotnet test "eLogger.sln" --configuration Debug --settings .runsettings
 ```
 
-The gdUnit4 shell runner works as well:
+The gdUnit4 shell runner works as well, also from `src/elogger`. Use `-a` to run a single suite:
 
 ```bash
+cd src/elogger
 export GODOT_BIN=/path/to/godot
 ./addons/gdUnit4/runtest.sh
+./addons/gdUnit4/runtest.sh -a res://Tests/GodotOSLoggerTest.cs
 ```
+
+Exported games compile without `TOOLS`, so CI also builds the `ExportDebug` and `ExportRelease` configurations to
+catch runtime code that still depends on editor-only ePlugin types.
 
 See the [CI workflow](https://github.com/enaweg/godot-elogger/blob/main/.github/workflows/ci-pr.yml) for the complete headless test setup.
 
