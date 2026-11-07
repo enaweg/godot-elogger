@@ -125,6 +125,69 @@ public class DiagnosticsHelperTest
             .IsEqual("/home/dev/game2/Player.cs");
     }
 
+    [TestCase]
+    public void CleanupException_PrintsTypeMessageAndCleanedUpFrames()
+    {
+        var exception = Catch(() => ThrowFrom("outer"));
+
+        var result = DiagnosticsHelper.CleanupException(exception);
+
+        AssertThat(result).StartsWith("System.InvalidOperationException: outer");
+        AssertThat(result).Contains($"void {typeof(DiagnosticsHelperTest).FullName}.{nameof(ThrowFrom)}(string message)");
+        AssertThat(result).NotContains("   at ");
+    }
+
+    [TestCase]
+    public void CleanupException_IncludesInnerExceptions()
+    {
+        var exception = Catch(() =>
+        {
+            try
+            {
+                ThrowFrom("inner");
+            }
+            catch (Exception inner)
+            {
+                throw new ArgumentException("outer", inner);
+            }
+        });
+
+        var result = DiagnosticsHelper.CleanupException(exception);
+
+        AssertThat(result).StartsWith("System.ArgumentException: outer");
+        AssertThat(result).Contains("---> System.InvalidOperationException: inner");
+        AssertThat(result).Contains($"{nameof(ThrowFrom)}(string message)");
+    }
+
+    [TestCase]
+    public void CleanupException_IncludesEveryExceptionOfAnAggregate()
+    {
+        var exception = new AggregateException(Catch(() => ThrowFrom("first")), Catch(() => ThrowFrom("second")));
+
+        var result = DiagnosticsHelper.CleanupException(exception);
+
+        AssertThat(result).StartsWith("System.AggregateException: ");
+        AssertThat(result).Contains("---> System.InvalidOperationException: first");
+        AssertThat(result).Contains("---> System.InvalidOperationException: second");
+    }
+
+    static Exception Catch(Action action)
+    {
+        try
+        {
+            action();
+        }
+        catch (Exception e)
+        {
+            return e;
+        }
+
+        throw new InvalidOperationException("the action did not throw");
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static void ThrowFrom(string message) => throw new InvalidOperationException(message);
+
     [MethodImpl(MethodImplOptions.NoInlining)]
     static string CaptureStackTraceFrom(int value, string text) =>
         DiagnosticsHelper.CleanupStackTrace(new StackTrace(true));
