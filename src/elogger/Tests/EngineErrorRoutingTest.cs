@@ -72,6 +72,23 @@ public partial class EngineErrorRoutingTest
     }
 
     [TestCase]
+    public void EnginePrint_ArrivesWithoutTheEnginesLineBreak()
+    {
+        var marker = Guid.NewGuid().ToString("N");
+        var sink = new MemorySink();
+
+        using (var factory = CreateFactory(sink))
+        {
+            factory.CreateLogger("warmup");
+
+            GD.Print($"engine-print-{marker}");
+        }
+
+        AssertThat(sink.Entries.Where(e => e.Message.Contains(marker)).Select(e => e.Message))
+            .ContainsExactly($"engine-print-{marker}");
+    }
+
+    [TestCase]
     public void EngineCategoryPrefix_ConfiguredThroughTheBuilder_IsUsed()
     {
         var marker = Guid.NewGuid().ToString("N");
