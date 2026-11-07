@@ -69,7 +69,7 @@ ePlugin has its own lightweight logging interfaces (`Enaweg.Plugin.Logging.ILogg
 
 ### eLogger plugin (`addons/eLogger/`)
 
-`ELoggerPlugin.CreateRecipe` registers the `ZLogger` and `ZString` NuGet packages and exposes the `.src` directory (which contains the runtime source files). Because the plugin is enabled in this dev project, those packages (`ZLogger` 2.5.10, `ZString` 2.6.0) appear in `eLogger.csproj` and the directory exists as `src/` on disk.
+`ELoggerPlugin.CreateRecipe` registers the `ZLogger` and `ZString` NuGet packages and exposes the `.src` directory (which contains the runtime source files). Because the plugin is enabled in this dev project, those packages (`ZLogger` 2.6.1, `ZString` 2.6.0) appear in `eLogger.csproj` and the directory exists as `src/` on disk.
 
 **ZLogger → Godot routing** is handled by two `IAsyncLogProcessor` implementations:
 

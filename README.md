@@ -47,7 +47,9 @@ Its main features:
 + **Built-in sinks.** `AddZLoggerConsole`, `AddZLoggerFile`, `AddZLoggerRollingFile` (rotating by interval or size),
   `AddZLoggerStream`, `AddZLoggerInMemory`, and `AddZLoggerLogProcessor` for custom processors.
 + **Source-generated log methods.** `[ZLoggerMessage]` turns a `partial` method declaration into a strongly typed,
-  allocation-free logging method with a fixed message template and `EventId`.
+  allocation-free logging method with a fixed message template and `EventId`. Since ZLogger 2.6 these can be
+  instance methods that pick up the class's `ILogger` field, which suits Godot scripts (already `partial` classes),
+  and `JsonSerializerContext = typeof(...)` supplies a source-generated JSON context for Native AOT exports.
 + **Rich log entries.** Scopes (`IncludeScopes`), event IDs, caller and thread information (`CaptureThreadInfo`),
   timestamps from an injectable `TimeProvider`, and an arbitrary per-entry context object — the last is what
   eLogger reads to recognize the emitting `GodotObject`.
