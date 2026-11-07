@@ -1,6 +1,7 @@
 using System;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
 using GdUnit4;
 using Godot;
 using Microsoft.Extensions.Logging;
@@ -74,12 +75,28 @@ public partial class GodotDebugLogProcessorTest
 
         var text = output.Single().Text;
         AssertThat(text).StartsWith($"failed-{marker}");
+        AssertThat(text).Contains("System.InvalidOperationException: boom");
         AssertThat(text).Contains($"void {typeof(GodotDebugLogProcessorTest).FullName}.{nameof(ThrowingFrame)}()");
         AssertThat(text).EndsWith("---");
     }
 
     [TestCase]
-    public void Post_WithoutPrettyStacktrace_LeavesTheMessageAlone()
+    public void Post_WithPrettyStacktrace_DoesNotAlsoPrintTheRawTrace()
+    {
+        var marker = Guid.NewGuid().ToString("N");
+        var exception = ThrowAndCatch();
+
+        var output = Capture(new ZLoggerGodotDebugOptions { PrettyStacktrace = true },
+            logger => logger.ZLogError(exception, $"failed-{marker}"), marker);
+
+        // The plain-text formatter appends exception.ToString(), whose frames start with "   at ".
+        var text = output.Single().Text;
+        AssertThat(text).NotContains("   at ");
+        AssertThat(Regex.Matches(text, "System.InvalidOperationException: boom").Count).IsEqual(1);
+    }
+
+    [TestCase]
+    public void Post_WithoutPrettyStacktrace_LeavesTheFormatterTraceAlone()
     {
         var marker = Guid.NewGuid().ToString("N");
         var exception = ThrowAndCatch();
@@ -87,7 +104,10 @@ public partial class GodotDebugLogProcessorTest
         var output = Capture(new ZLoggerGodotDebugOptions { PrettyStacktrace = false },
             logger => logger.ZLogError(exception, $"failed-{marker}"), marker);
 
-        AssertThat(output.Single().Text).NotContains("---");
+        var text = output.Single().Text;
+        AssertThat(text).NotContains("---");
+        AssertThat(text).Contains("System.InvalidOperationException: boom");
+        AssertThat(text).Contains("   at ");
     }
 
     [TestCase]
