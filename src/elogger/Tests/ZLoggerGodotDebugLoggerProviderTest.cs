@@ -149,6 +149,110 @@ public partial class ZLoggerGodotDebugLoggerProviderTest
         sut._LogMessage("after dispose", true);
     }
 
+#if TOOLS
+    [TestCase]
+    public void Dispose_WithEPluginIntegration_HandsEPluginLoggingBack()
+    {
+        var host = new FakeEPluginLoggingHost();
+        WithEPluginLoggingSwitch(new EPluginLoggingSwitch(host), () =>
+        {
+            var provider = new ZLoggerGodotDebugLoggerProvider(new ZLoggerGodotDebugOptions());
+            AssertObject(host.Current).IsInstanceOf<EPluginLoggerFactory>();
+
+            provider.Dispose();
+
+            // ePlugin must not keep a factory whose CreateLogger throws ObjectDisposedException.
+            AssertObject(host.Current).IsInstanceOf<Enaweg.Plugin.Logging.GenericLoggerFactory>();
+            host.Current!.CreateLogger("after dispose").Log("still logging");
+        });
+    }
+
+    [TestCase]
+    public void DisposeAsync_WithEPluginIntegration_HandsEPluginLoggingBack()
+    {
+        var host = new FakeEPluginLoggingHost();
+        WithEPluginLoggingSwitch(new EPluginLoggingSwitch(host), () =>
+        {
+            var provider = new ZLoggerGodotDebugLoggerProvider(new ZLoggerGodotDebugOptions());
+
+            provider.DisposeAsync().AsTask().GetAwaiter().GetResult();
+
+            AssertObject(host.Current).IsInstanceOf<Enaweg.Plugin.Logging.GenericLoggerFactory>();
+        });
+    }
+
+    [TestCase]
+    public void Dispose_OfAnEarlierProvider_KeepsEPluginOnTheLaterOne()
+    {
+        var host = new FakeEPluginLoggingHost();
+        WithEPluginLoggingSwitch(new EPluginLoggingSwitch(host), () =>
+        {
+            var first = new ZLoggerGodotDebugLoggerProvider(new ZLoggerGodotDebugOptions());
+            using var second = new ZLoggerGodotDebugLoggerProvider(new ZLoggerGodotDebugOptions());
+            var current = host.Current!;
+
+            first.Dispose();
+
+            AssertObject(host.Current).IsSame(current);
+        });
+    }
+
+    [TestCase]
+    public void Provider_WithoutEPluginIntegration_LeavesEPluginAlone()
+    {
+        var host = new FakeEPluginLoggingHost();
+        WithEPluginLoggingSwitch(new EPluginLoggingSwitch(host), () =>
+        {
+            CreateProvider().Dispose();
+
+            AssertThat(host.Switches).IsEmpty();
+        });
+    }
+
+    [TestCase]
+    public void EPluginMessages_ReachOtherSinksAndHonourFilters()
+    {
+        var marker = Guid.NewGuid().ToString("N");
+        var host = new FakeEPluginLoggingHost();
+        var sink = new MemorySink();
+        WithEPluginLoggingSwitch(new EPluginLoggingSwitch(host), () =>
+        {
+            using var factory = LoggerFactory.Create(logging =>
+            {
+                logging.SetMinimumLevel(LogLevel.Trace);
+                logging.AddFilter("Enaweg.Plugin.Noisy", LogLevel.Warning);
+                logging.AddZLoggerGodotDebug();
+                logging.AddZLoggerLogProcessor(sink);
+            });
+
+            // ePlugin got this logger while the factory was still being built.
+            host.Logger!.Log($"framework-{marker}");
+            var noisy = host.Current!.CreateLogger("Enaweg.Plugin.Noisy");
+            noisy.Log($"noisy-info-{marker}");
+            noisy.Warn($"noisy-warning-{marker}");
+        });
+
+        AssertThat(sink.Entries.Where(e => e.Message.Contains(marker)).Select(e => (e.Category, e.Message)))
+            .ContainsExactly(
+                ("Enaweg.Plugin.EPluginPlugin", $"framework-{marker}"),
+                ("Enaweg.Plugin.Noisy", $"noisy-warning-{marker}"));
+    }
+
+    static void WithEPluginLoggingSwitch(EPluginLoggingSwitch ePluginLogging, Action action)
+    {
+        var global = EPluginLoggingSwitch.Global;
+        EPluginLoggingSwitch.Global = ePluginLogging;
+        try
+        {
+            action();
+        }
+        finally
+        {
+            EPluginLoggingSwitch.Global = global;
+        }
+    }
+#endif
+
     static ZLoggerGodotDebugLoggerProvider CreateProvider() =>
         new(new ZLoggerGodotDebugOptions { EPluginIntegration = false });
 

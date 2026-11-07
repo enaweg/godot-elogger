@@ -89,7 +89,7 @@ Two `IAsyncLogProcessor` implementations handle ZLogger-to-Godot routing:
 
 `GodotOSLogger` logs through the application's `ILoggerFactory`, resolved lazily from the `IServiceProvider` because the factory depends on every `ILoggerProvider`. Engine messages therefore reach every configured sink, not just this provider. Each Godot error type maps to its own category — `Godot.Engine`, `Godot.Script`, `Godot.Shader` and `Godot.Output` under `EngineCategoryPrefix` — and the loggers are cached per category. `GodotLogGuard` stops output a processor just wrote from being captured and logged a second time.
 
-When `ZLoggerGodotDebugOptions.EPluginIntegration` is `true` (the default), the provider calls `EGlobal.Instance.SwitchLogging(new EPluginLoggerFactory(this))`. This replaces ePlugin's internal `GodotConsoleLogger` with one backed by ZLogger. `EPluginLoggerFactory` and `EPluginLogger` are bridge adapters between ePlugin's `ILoggerFactory`/`ILogger` and ZLogger's `ILoggerProvider`.
+When `ZLoggerGodotDebugOptions.EPluginIntegration` is `true` (the default), the provider switches ePlugin's logging (`EGlobal.SwitchLogging`, through `EPluginLoggingSwitch`) to an `EPluginLoggerFactory`. This replaces ePlugin's internal `GodotConsoleLogger`. `EPluginLoggerFactory` and `EPluginLogger` are bridge adapters between ePlugin's `ILoggerFactory`/`ILogger` and Microsoft.Extensions.Logging. Like engine messages, ePlugin's messages go through the application's `ILoggerFactory`, resolved per message because ePlugin creates its loggers while that factory is still being built. On dispose, the provider hands ePlugin's logging back to the previous provider or to ePlugin's default.
 
 ### Editor-only guards
 
