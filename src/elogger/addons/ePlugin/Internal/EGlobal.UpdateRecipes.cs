@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using Enaweg.Plugin.Internal.Kinds;
 using Enaweg.Plugin.Internal.Update;
 using Godot;
 
@@ -28,8 +29,9 @@ internal sealed partial class EGlobal
     }
 
     /// <summary>
-    /// What the project already rules out for these updates before anything is downloaded: an installed GDExtension, or
-    /// an enabled plugin's version constraint on an updated plugin.
+    /// What the project already rules out for these updates before anything is downloaded: a GDExtension in the installed
+    /// framework (every other plugin updates its own, see <see cref="GDExtensionPluginWorkflow"/>), or an enabled plugin's
+    /// version constraint on an updated plugin.
     /// </summary>
     internal IReadOnlyList<Finding> UpdatePreflightFindings(IReadOnlyList<UpdateCandidate> candidates)
     {
@@ -37,7 +39,8 @@ internal sealed partial class EGlobal
         foreach (var candidate in candidates)
         {
             var directory = ProjectSettings.GlobalizePath(_host.PluginDirectory(candidate.Slug));
-            if (Directory.Exists(directory) && AddonPackageValidator.NativeExtension(PackageFiles.Files(directory)) is { } native) findings.Add(native);
+            if (candidate.Slug == FrameworkSlug && Directory.Exists(directory) &&
+                PluginKindWorkflow.RefuseNativeExtension(PackageFiles.Files(directory)) is { } native) findings.Add(native);
         }
         var updated = candidates.ToDictionary(c => c.Slug, StringComparer.Ordinal);
         foreach (var context in _contexts.Where(c => c.Plugin is not null && c.State == EEditorPluginState.Activated))
@@ -112,7 +115,7 @@ internal sealed partial class EGlobal
                 else record.Target = new();
             }
             var snapshots = journal.Recipes.ToDictionary(p => p.Key, p => p.Value.Target!);
-            var conflicts = snapshots.Values.SelectMany(s => s.Nugets).GroupBy(n => n.Name).Any(g => g.Select(n => (n.Version, n.Source)).Distinct().Count() > 1);
+            var conflicts = snapshots.Values.SelectMany(s => s.Nugets).GroupBy(n => n.Name, StringComparer.OrdinalIgnoreCase).Any(g => g.Select(n => (n.Version, n.Source)).Distinct().Count() > 1);
             if (!rollback && conflicts) throw new InvalidOperationException("Updated recipes declare conflicting versions or sources for a shared NuGet package.");
             journal.Save();
             var order = RecipeReconciler.DependencyOrder(snapshots);
@@ -155,7 +158,7 @@ internal sealed partial class EGlobal
                     if (updated) context.AppliedOptionalDependencies = null;
                     entry.Value.Target = Snapshot(context, updated ? null : entry.Value.Old.AppliedOptionals);
                 }
-                if (journal.Recipes.Values.SelectMany(r => r.Target!.Nugets).GroupBy(n => n.Name).Any(g => g.Select(n => (n.Version, n.Source)).Distinct().Count() > 1))
+                if (journal.Recipes.Values.SelectMany(r => r.Target!.Nugets).GroupBy(n => n.Name, StringComparer.OrdinalIgnoreCase).Any(g => g.Select(n => (n.Version, n.Source)).Distinct().Count() > 1))
                     throw new InvalidOperationException("Newly enabled dependencies declare conflicting versions or sources for a shared NuGet package.");
                 journal.Save();
                 foreach (var slug in RecipeReconciler.DependencyOrder(journal.Recipes.ToDictionary(p => p.Key, p => p.Value.Target!)))
@@ -193,31 +196,44 @@ internal sealed partial class EGlobal
         finally { _recipeUpdateJournal = null; _updateRefreshSuppression--; }
     }
     /// <summary>
-    /// Plugins this journal must leave as they are: those another group of the batch has swapped but not reconciled yet,
-    /// whose loaded code may already be their new version, and those rolled back since this assembly was loaded, whose
-    /// loaded code still is. Their recipes are reconciled by their own journal, or after the next restart.
+    /// Plugins this journal must leave as they are: those another update has swapped but not reconciled yet (another
+    /// group of the batch, or an update kept before reconciling that Retry still resumes), whose loaded code may already
+    /// be their new version, and those rolled back since this assembly was loaded, whose loaded code still is. Their
+    /// recipes are reconciled by their own journal, or after the next restart.
     /// </summary>
     private HashSet<string> UntouchedRecipes(UpdateJournal journal)
     {
         var untouched = new HashSet<string>(_rolledBackUpdates, StringComparer.Ordinal);
-        foreach (var other in _updateJournals?.Read().Where(j => j.IsActive && j.Id != journal.Id) ?? [])
+        foreach (var other in _updateJournals?.Read().Where(j => j.Id != journal.Id && (j.IsActive || IsKeptBeforeReconcile(j))) ?? [])
             untouched.UnionWith(other.Plugins.Select(p => p.Slug));
         untouched.ExceptWith(journal.Plugins.Select(p => p.Slug));
         return untouched;
     }
 
+    /// <summary>Kept with build errors before reconciling, with the marker Retry resumes it by.</summary>
+    private bool IsKeptBeforeReconcile(UpdateJournal journal) =>
+        journal is { State: UpdatePhase.CommittedWithErrors, BeforeReconcile: true } &&
+        _stateStore?.LocalAttempts.Any(a => a.AttemptId == journal.AttemptId) == true;
+
+    /// <summary>
+    /// The recipes of the journal's other plugins, every activated one, as they are reconciled to: like
+    /// <see cref="RemainingRecipes"/> when disabling, a project or autoload one of them declares stays installed.
+    /// </summary>
+    private static List<EEditorPluginRecipe> OtherUpdateRecipes(PluginContext context, UpdateJournal journal) =>
+        journal.Recipes.Where(r => r.Key != context.Slug).Select(r => (r.Value.Target ?? r.Value.Applied).ToRecipe()).ToList();
+
     private void ExecuteUpdateOperation(PluginContext context, RecipeOperation operation, UpdateJournal journal, UpdatePluginJournal? plugin)
     {
         switch (operation.Kind)
         {
-            case RecipeOperationKind.RemoveAutoload: ReverseAutoload(context, operation.Autoload!); break;
-            case RecipeOperationKind.RemoveProject: ReverseProject(context, operation.Project!); break;
-            case RecipeOperationKind.HideDirectory: ShowHideHelper.HideDirectory(context, operation.Directory!); break;
-            case RecipeOperationKind.ShowDirectory: ShowHideHelper.ShowDirectory(context, operation.Directory!); break;
+            case RecipeOperationKind.RemoveAutoload: ReverseAutoload(context, operation.Autoload!, OtherUpdateRecipes(context, journal)); break;
+            case RecipeOperationKind.RemoveProject: ReverseProject(context, operation.Project!, OtherUpdateRecipes(context, journal)); break;
+            case RecipeOperationKind.HideDirectory: ShowHideHelper.HideDirectory(context, operation.Directory!, _host); break;
+            case RecipeOperationKind.ShowDirectory: ShowHideHelper.ShowDirectory(context, operation.Directory!, _host); break;
             case RecipeOperationKind.RemoveNuget: ReverseNuget(context, operation.Nuget!); break;
             case RecipeOperationKind.AddNuget: ApplyNuget(context, operation.Nuget!); break;
             case RecipeOperationKind.AddProject: ApplyProject(context, operation.Project!); break;
-            case RecipeOperationKind.AddAutoload: ApplyAutoload(context, operation.Autoload!); break;
+            case RecipeOperationKind.AddAutoload: ApplyAutoload(context, operation.Autoload!, OtherUpdateRecipes(context, journal)); break;
             case RecipeOperationKind.EnsureDependency: EnsureUpdateDependency(operation.Dependency!); break;
             case RecipeOperationKind.PrepareTree:
                 if (plugin is not null)

@@ -1,0 +1,244 @@
+#if TOOLS
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Threading;
+
+namespace Enaweg.Plugin.Internal.Update;
+
+/// <summary>How an update replaces a plugin folder with its staged version and puts the backup back on rollback.</summary>
+internal interface IAddonSwap
+{
+    /// <summary>Shown in the log, so it tells which strategy an update used.</summary>
+    string Name { get; }
+
+    /// <summary>
+    /// Replaces <paramref name="installed"/> with <paramref name="staging"/>, leaving the old version complete in
+    /// <paramref name="backup"/>. Files that can be moved but not deleted go to <paramref name="discard"/>.
+    /// </summary>
+    /// <returns>How many old files were still in use and had to be moved to <paramref name="discard"/>.</returns>
+    int Install(string installed, string staging, string backup, string discard);
+
+    /// <summary>
+    /// Puts <paramref name="backup"/> back in place of <paramref name="installed"/>. Once it returns, the backup is gone
+    /// from its place, so a repeated rollback does not restore it again.
+    /// </summary>
+    /// <returns>How many files of the replaced version were still in use and had to be moved to <paramref name="discard"/>.</returns>
+    int Restore(string installed, string backup, string discard);
+}
+
+/// <summary>Moves the whole plugin folder: the old one becomes the backup, the staging folder takes its place.</summary>
+internal sealed class AddonFolderSwap : IAddonSwap
+{
+    public static readonly AddonFolderSwap Instance = new();
+    public string Name => "folder swap";
+
+    public int Install(string installed, string staging, string backup, string discard)
+    {
+        AddonFiles.RefuseLink(installed);
+        AddonFiles.RefuseRepository(installed);
+        Directory.CreateDirectory(Path.GetDirectoryName(backup)!);
+        AddonFiles.MoveDirectory(installed, backup);
+        AddonFiles.MoveDirectory(staging, installed);
+        return 0;
+    }
+
+    public int Restore(string installed, string backup, string discard)
+    {
+        AddonFiles.RefuseRepository(installed);
+        AddonFiles.DeleteTree(installed);
+        AddonFiles.MoveDirectory(backup, installed);
+        return 0;
+    }
+}
+
+/// <summary>
+/// Replaces the files of a plugin folder one by one and keeps the folder itself. In the editor on Windows, Godot loads
+/// every GDExtension library from a copy next to it whose name starts with '~' (<see cref="PackageFiles.IsRuntimeCopy"/>)
+/// and keeps that copy open, so the folder cannot be moved; the original library can be deleted and replaced. On other
+/// systems the original is loaded, and a file that is deleted (rather than overwritten) stays mapped for the old library.
+/// The runtime copies are never backed up, deleted or installed: Godot removes them itself when it closes the library.
+/// <para>
+/// The backup is copied completely, and renamed into place, before any installed file changes, so an interrupted swap or
+/// restore can always be repeated from it. Restoring copies rather than moves for the same reason.
+/// </para>
+/// </summary>
+internal sealed class AddonFileSwap : IAddonSwap
+{
+    public static readonly AddonFileSwap Instance = new();
+    public string Name => "file-by-file swap keeping Godot's runtime copies";
+
+    public int Install(string installed, string staging, string backup, string discard)
+    {
+        AddonFiles.RefuseLink(installed);
+        AddonFiles.RefuseRepository(installed);
+        var partial = backup + ".partial";
+        AddonFiles.DeleteTree(partial);
+        if (Directory.Exists(backup)) throw new IOException("A backup of the plugin already exists: " + backup);
+        AddonFiles.CopyTree(installed, partial);
+        Directory.CreateDirectory(Path.GetDirectoryName(backup)!);
+        AddonFiles.MoveDirectory(partial, backup);
+        var discarded = AddonFiles.RemoveContents(installed, discard);
+        AddonFiles.MoveContents(staging, installed);
+        AddonFiles.DeleteTree(staging);
+        return discarded;
+    }
+
+    public int Restore(string installed, string backup, string discard)
+    {
+        Directory.CreateDirectory(installed);
+        AddonFiles.RefuseLink(installed);
+        AddonFiles.RefuseRepository(installed);
+        var discarded = AddonFiles.RemoveContents(installed, discard);
+        AddonFiles.CopyTree(backup, installed);
+        // Moved aside in one step before it is deleted: a delete that stops halfway would leave a partial backup that a
+        // repeated restore copies back over the complete one. The journal's folder is removed with whatever remains.
+        var restored = Restored(backup);
+        Directory.CreateDirectory(Path.GetDirectoryName(restored)!);
+        for (var n = 1; Directory.Exists(restored); n++) restored = Restored(backup) + "." + n;
+        AddonFiles.MoveDirectory(backup, restored);
+        try { AddonFiles.DeleteTree(restored); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        return discarded;
+    }
+
+    /// <summary>Where a backup goes once it was restored: next to the journal's <c>backup</c> folder, not inside it.</summary>
+    internal static string Restored(string backup) =>
+        Path.Combine(Path.GetDirectoryName(Path.GetDirectoryName(backup))!, "restored", Path.GetFileName(backup));
+}
+
+internal static class AddonFiles
+{
+    public static void MoveDirectory(string from, string to)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            try { Directory.Move(from, to); return; }
+            catch (IOException) when (attempt < 2) { Thread.Sleep(200); }
+        }
+    }
+
+    /// <summary>
+    /// Deletes a folder with everything in it, read-only files included, which Windows refuses to delete otherwise
+    /// (version control systems such as Perforce sync files read-only). Links are deleted, not followed.
+    /// </summary>
+    public static void DeleteTree(string directory)
+    {
+        if (!Directory.Exists(directory)) return;
+        var options = new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint };
+        foreach (var file in Directory.EnumerateFiles(directory, "*", options)) File.SetAttributes(file, FileAttributes.Normal);
+        Directory.Delete(directory, true);
+    }
+
+    /// <summary>Copies a file over another, also over a read-only one (see <see cref="DeleteTree"/>).</summary>
+    public static void Overwrite(string from, string to)
+    {
+        if (File.Exists(to)) File.SetAttributes(to, File.GetAttributes(to) & ~FileAttributes.ReadOnly);
+        File.Copy(from, to, true);
+    }
+
+    /// <summary>
+    /// Refuses to replace a folder that holds a git repository (a <c>.git</c> file or folder in it or below it): packages
+    /// never contain one (<see cref="PackageFiles.Skip"/>), so a swap would move it into the backup that the commit deletes.
+    /// Git submodules are updated through git instead (<see cref="SubmoduleSwap"/>).
+    /// </summary>
+    public static void RefuseRepository(string directory)
+    {
+        if (!Directory.Exists(directory)) return;
+        var own = Path.Combine(directory, PluginRepository.GitEntry);
+        var git = File.Exists(own) || Directory.Exists(own) ? own : PluginRepository.Nested(directory);
+        if (git is not null)
+            throw new IOException($"{directory} holds the git repository {git}, which replacing its files would delete; update it with git.");
+    }
+
+    /// <summary>Deletes a file when it exists, also a read-only one (see <see cref="DeleteTree"/>).</summary>
+    public static void DeleteFile(string file)
+    {
+        if (!File.Exists(file)) return;
+        File.SetAttributes(file, FileAttributes.Normal);
+        File.Delete(file);
+    }
+
+    public static void RefuseLink(string directory)
+    {
+        if (Directory.Exists(directory) && (File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0)
+            throw new IOException($"{directory} is a link; update the plugin where it points to.");
+    }
+
+    /// <summary>Every entry below <paramref name="root"/> except Godot's runtime copies; refuses links.</summary>
+    private static IEnumerable<string> Entries(string root, bool directories)
+    {
+        foreach (var entry in Directory.EnumerateFileSystemEntries(root))
+        {
+            if ((File.GetAttributes(entry) & FileAttributes.ReparsePoint) != 0) throw new IOException("Links inside the plugin folder cannot be swapped file by file: " + entry);
+            if (Directory.Exists(entry))
+            {
+                foreach (var child in Entries(entry, directories)) yield return child;
+                if (directories) yield return entry;
+            }
+            else if (!PackageFiles.IsRuntimeCopy(Path.GetFileName(entry))) yield return entry;
+        }
+    }
+
+    /// <summary>Copies every file except Godot's runtime copies, with its timestamps, into <paramref name="target"/>.</summary>
+    public static void CopyTree(string source, string target)
+    {
+        Directory.CreateDirectory(target);
+        foreach (var file in Entries(source, false).ToArray())
+        {
+            var to = Path.Combine(target, Path.GetRelativePath(source, file));
+            Directory.CreateDirectory(Path.GetDirectoryName(to)!);
+            Overwrite(file, to);
+            File.SetLastWriteTimeUtc(to, File.GetLastWriteTimeUtc(file));
+        }
+        // Empty folders belong to the plugin, too (e.g. a hidden managed directory).
+        foreach (var directory in Entries(source, true).Where(Directory.Exists).ToArray())
+            Directory.CreateDirectory(Path.Combine(target, Path.GetRelativePath(source, directory)));
+    }
+
+    /// <summary>
+    /// Deletes every file below <paramref name="root"/> except Godot's runtime copies, then the folders left empty. A file
+    /// that cannot be deleted, e.g. a native library Godot loaded directly, is moved to <paramref name="discard"/>, which
+    /// renaming an open library allows; it is deleted with the journal once the editor no longer uses it.
+    /// </summary>
+    /// <returns>How many files had to be moved to <paramref name="discard"/>.</returns>
+    public static int RemoveContents(string root, string discard)
+    {
+        var discarded = 0;
+        foreach (var file in Entries(root, false).ToArray())
+        {
+            try
+            {
+                File.SetAttributes(file, FileAttributes.Normal);
+                File.Delete(file);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                var to = Path.Combine(discard, Path.GetRelativePath(root, file));
+                Directory.CreateDirectory(Path.GetDirectoryName(to)!);
+                for (var n = 1; File.Exists(to); n++) to = Path.Combine(discard, Path.GetRelativePath(root, file) + "." + n);
+                File.Move(file, to);
+                discarded++;
+            }
+        }
+        foreach (var directory in Entries(root, true).Where(Directory.Exists).ToArray())
+            if (!Directory.EnumerateFileSystemEntries(directory).Any()) Directory.Delete(directory);
+        return discarded;
+    }
+
+    /// <summary>Moves every file below <paramref name="source"/> to the same place below <paramref name="target"/>.</summary>
+    public static void MoveContents(string source, string target)
+    {
+        Directory.CreateDirectory(target);
+        foreach (var file in Entries(source, false).ToArray())
+        {
+            var to = Path.Combine(target, Path.GetRelativePath(source, file));
+            Directory.CreateDirectory(Path.GetDirectoryName(to)!);
+            File.Move(file, to);
+        }
+        foreach (var directory in Entries(source, true).Where(Directory.Exists).ToArray())
+            Directory.CreateDirectory(Path.Combine(target, Path.GetRelativePath(source, directory)));
+    }
+}
+#endif

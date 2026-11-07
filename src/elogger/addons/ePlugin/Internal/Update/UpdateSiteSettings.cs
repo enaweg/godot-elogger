@@ -41,6 +41,15 @@ internal sealed class UpdateSiteSettings(string path)
 
     public string? UrlOf(string slug) => _config.Sites.FirstOrDefault(s => s.Slug == slug)?.Url;
 
+    /// <summary>
+    /// Whether a project's update site only repeats the built-in list's site of its plugin (<paramref name="builtInUrl"/>,
+    /// null while the list is turned off), so removing it leaves the sites that are tried as they are: the plugin.cfg
+    /// update_url it would come before is none or the same site. Sites set before the built-in list named their plugin
+    /// are often like that.
+    /// </summary>
+    public static bool RepeatsBuiltIn(string site, string? updateUrl, string? builtInUrl) =>
+        builtInUrl is not null && site == builtInUrl && (string.IsNullOrWhiteSpace(updateUrl) || updateUrl == site);
+
     public void Load()
     {
         Problem = null;
@@ -73,15 +82,19 @@ internal sealed class UpdateSiteSettings(string path)
         url = url.Trim();
         if (!UpdateSourceFactory.IsSupported(url))
             throw new ArgumentException(
-                "Enter a GitHub or GitLab releases URL, a repository's tag page ending in /tags, or a Git repository URL ending in .git or with ?path=.", nameof(url));
+                "Enter a GitHub, GitLab, Forgejo or Gitea (Codeberg) releases URL, a repository's tag page ending in /tags, or a Git repository URL ending in .git or with ?path=.", nameof(url));
         return Change(sites => sites.Any(s => s.Slug == slug && s.Url == url) ? null
             : [.. sites.Where(s => s.Slug != slug), new UpdateSiteEntry { Slug = slug, Url = url }]);
     }
 
     /// <summary>Removes the update site of a plugin; false when it has none.</summary>
     /// <exception cref="InvalidOperationException">The file cannot be changed, see <see cref="Problem"/>.</exception>
-    public bool Remove(string slug) =>
-        Change(sites => sites.Any(s => s.Slug == slug) ? sites.Where(s => s.Slug != slug).ToList() : null);
+    public bool Remove(string slug) => Remove([slug]);
+
+    /// <summary>Removes the update sites of several plugins in one change; false when none of them has one.</summary>
+    /// <exception cref="InvalidOperationException">The file cannot be changed, see <see cref="Problem"/>.</exception>
+    public bool Remove(IReadOnlyCollection<string> slugs) =>
+        Change(sites => sites.Any(s => slugs.Contains(s.Slug)) ? sites.Where(s => !slugs.Contains(s.Slug)).ToList() : null);
 
     /// <summary>
     /// Reads the file again, applies the change and saves; the sites in memory change only once saving worked. The

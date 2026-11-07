@@ -9,24 +9,28 @@ namespace Enaweg.Plugin;
 
 /// <summary>
 /// Helper extensions for <see cref="EditorPlugin"/> that resolve plugin identity and metadata
-/// from the plugin's on-disk layout (its <c>res://addons/&lt;slug&gt;/</c> directory and
+/// from the plugin's on-disk layout (its <c>res://addons/&lt;slug&gt;/</c> directory, also in a subfolder, and
 /// <c>plugin.cfg</c>).
 /// </summary>
 [Tool]
 public static class EditorPluginExtensions
 {
     /// <summary>
-    /// Returns the plugin's slug — the directory name under <c>res://addons/</c> that contains it
-    /// (e.g. <c>"my-plugin"</c> for <c>res://addons/my-plugin/MyPlugin.cs</c>).
+    /// Returns the plugin's slug — the path of its directory below <c>res://addons/</c>, with <c>/</c>
+    /// (e.g. <c>"my-plugin"</c> for <c>res://addons/my-plugin/MyPlugin.cs</c>, and <c>"acme/my-plugin"</c> for a plugin
+    /// in a subfolder, <c>res://addons/acme/my-plugin/MyPlugin.cs</c>). It is the name Godot's
+    /// <c>EditorInterface.SetPluginEnabled</c> takes, and the one dependencies name the plugin by.
     /// </summary>
     /// <param name="plugin">The editor plugin to inspect.</param>
-    /// <returns>The leaf directory name of the plugin's install location.</returns>
+    /// <returns>
+    /// The plugin's directory below <c>res://addons/</c>; for a plugin outside it, the name of its directory.
+    /// </returns>
     public static string GetPluginSlug(this EditorPlugin plugin)
     {
         var path = GetPluginDirectory(plugin);
         if (path is not null)
         {
-            return Path.GetFileName(path);
+            return AddonLayout.SlugOf(path) ?? Path.GetFileName(path);
         }
 
         return string.IsNullOrEmpty(plugin.Name) ? $"plugin-{plugin.GetInstanceId()}" : plugin.Name;
@@ -38,8 +42,9 @@ public static class EditorPluginExtensions
     /// </summary>
     /// <param name="plugin">The editor plugin to inspect.</param>
     /// <returns>
-    /// The directory portion of the script path (e.g. <c>res://addons/my-plugin</c> for a script
-    /// at <c>res://addons/my-plugin/MyPlugin.cs</c>).
+    /// The directory with the <c>plugin.cfg</c> closest to the script (e.g. <c>res://addons/my-plugin</c> for a script
+    /// at <c>res://addons/my-plugin/MyPlugin.cs</c> or <c>res://addons/my-plugin/src/MyPlugin.cs</c>, and
+    /// <c>res://addons/acme/my-plugin</c> for one in a subfolder), else the script's own directory.
     /// </returns>
     public static string? GetPluginDirectory(this EditorPlugin plugin)
     {
@@ -54,7 +59,7 @@ public static class EditorPluginExtensions
             var script = (Script)scriptVar;
             if (script is not null)
             {
-                return script.GetPath().GetBaseDir();
+                return PluginDirectoryOf(script.GetPath(), directory => FileAccess.FileExists($"{directory}/plugin.cfg"));
             }
 
             return null;
@@ -68,6 +73,25 @@ public static class EditorPluginExtensions
     }
 
     /// <summary>
+    /// The directory below <c>res://addons</c> closest to <paramref name="scriptPath"/> that has a <c>plugin.cfg</c>,
+    /// since <c>plugin.cfg</c> may name a script in a subfolder; else the script's own directory.
+    /// </summary>
+    internal static string PluginDirectoryOf(string scriptPath, Func<string, bool> hasConfig)
+    {
+        const string addons = "res://addons/";
+        var scriptDirectory = scriptPath.GetBaseDir();
+        for (var directory = scriptDirectory; directory.StartsWith(addons, StringComparison.Ordinal) && directory.Length > addons.Length; directory = directory.GetBaseDir())
+        {
+            if (hasConfig(directory))
+            {
+                return directory;
+            }
+        }
+
+        return scriptDirectory;
+    }
+
+    /// <summary>
     /// Returns the <see cref="IDotnetCli"/> wrapper bound to this plugin's context.
     /// </summary>
     /// <param name="plugin">The Godot editor plugin requesting CLI access.</param>
@@ -76,6 +100,11 @@ public static class EditorPluginExtensions
     /// when the framework has not yet been initialized (for example, during the very early stages
     /// of an assembly reload before <c>_Process</c> re-runs the bootstrap).
     /// </returns>
+    /// <remarks>
+    /// The framework keeps a context for every plugin it has seen; calling this registers one for
+    /// <paramref name="plugin"/> if it has none yet, also for a plugin that does not implement
+    /// <see cref="IEEditorPlugin"/>.
+    /// </remarks>
     public static IDotnetCli? Cli(this EditorPlugin plugin)
     {
         var context = EGlobal.Instance.GetOrCreateContext(plugin);

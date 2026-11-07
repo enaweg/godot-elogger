@@ -8,6 +8,7 @@ using Enaweg.Plugin.Internal.Update;
 using System.Runtime.Loader;
 using Enaweg.Plugin.Internal;
 using Enaweg.Plugin.Internal.Licenses;
+using Enaweg.Plugin.Internal.Welcomes;
 using Enaweg.Plugin.Logging;
 using Godot;
 
@@ -19,13 +20,16 @@ public sealed partial class EPluginPlugin : EditorPlugin, IEPlugin, ISerializati
     private const string ManagerMenuName = "ePlugin Manager...";
     // Engine metadata survives assembly reloads, unlike the fields of this script instance.
     private const string ManagerButtonMeta = "eplugin_manager_button";
+    private const string ExportFilterMeta = "eplugin_export_filter";
     private readonly EditorSignalConnections _managerSignals = new();
     private bool _managerUiAdded;
     private Button? _managerButton;
+    private ManagerStatus _managerStatus;
     private EPluginManagerDialog? _managerDialog;
     private UpdateFailureDialog? _failureDialog;
     private LicenseDialog? _licenseDialog;
     private WelcomeDialog? _welcomeDialog;
+    private CleanupSuggestionDialog? _cleanupDialog;
     private EGlobal? _updateOwner;
     // A resumed update keeps its progress window until startup finishes and the manager has a few frames to draw.
     private bool _reopenManager;
@@ -33,8 +37,14 @@ public sealed partial class EPluginPlugin : EditorPlugin, IEPlugin, ISerializati
     private int _reopenFrames;
     private CancellationTokenSource _updateLifetime = new();
     private static readonly TimeSpan InitializeRetryDelay = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan MaxInitializeRetryDelay = TimeSpan.FromMinutes(5);
     private DateTime _nextInitializeAttempt;
+    // Why the last start failed and how often in a row; the toolbar button shows it until a start succeeds.
+    private Exception? _startupError;
+    private int _startupFailures;
     private bool _unloadingObserved;
+    // Set when a project setting changed, e.g. the enabled plugins: reading them every frame would cost for nothing.
+    private bool _pluginTogglesDue = true;
     internal CancellationToken UpdateLifetime => _updateLifetime.Token;
     /// <summary>The <c>eplugin/logging/debug</c> project setting.</summary>
     public bool EnableDebugLogging => LoggingSettings.Debug;
@@ -65,7 +75,8 @@ public sealed partial class EPluginPlugin : EditorPlugin, IEPlugin, ISerializati
             InitializeInternals();
         }
 
-        if (!_managerUiAdded && EGlobal.Instance.IsValid())
+        // a failed start keeps the button, which opens what went wrong instead of the manager
+        if (!_managerUiAdded && (EGlobal.Instance.IsValid() || _startupError is not null))
         {
             AddManagerUi();
         }
@@ -73,14 +84,19 @@ public sealed partial class EPluginPlugin : EditorPlugin, IEPlugin, ISerializati
         EGlobal.RunPosted();
         // Plain plugins enabled or disabled in Project Settings run no framework code; their licenses, dependants and
         // optional recipes are handled here, before the dialogs below look at them.
-        if (EGlobal.Instance.IsValid()) EGlobal.Instance.ObservePluginToggles();
+        if (_pluginTogglesDue) _pluginTogglesDue = !EGlobal.Instance.ObservePluginToggles();
+        // A plugin operation stuck on a dependency that never activates would lock the manager forever.
+        EGlobal.Instance.CheckStalledTransition(DateTime.UtcNow, Engine.GetProcessFrames(),
+            paused: IsOpen(_licenseDialog) || IsOpen(_failureDialog));
 
+        ShowManagerStatus();
         ReopenManager();
         ShowLicenseReview();
         ShowWelcomes();
+        ShowCleanupSuggestion();
     }
 
-    private static ManagerReopenMarker ManagerReopen => new(ProjectSettings.GlobalizePath("res://.godot/eplugin/manager-open"));
+    private static ManagerReopenMarker ManagerReopen => new(Path.Combine(EGlobal.Instance.Host.ProjectRoot, ".godot/eplugin/manager-open"));
 
     /// <summary>Opens the ePlugin Manager that was open when an update restarted the editor, then closes the progress window.</summary>
     private void ReopenManager()
@@ -129,11 +145,12 @@ public sealed partial class EPluginPlugin : EditorPlugin, IEPlugin, ISerializati
         }
     }
 
+    private static bool IsOpen(Window? dialog) => dialog is not null && GodotObject.IsInstanceValid(dialog);
+
     /// <summary>Shows the welcome pages of newly installed plugins once no other ePlugin dialog asks for a decision.</summary>
     private void ShowWelcomes()
     {
-        static bool Open(Window? dialog) => dialog is not null && GodotObject.IsInstanceValid(dialog);
-        if (!EGlobal.Instance.IsValid() || Open(_welcomeDialog) || Open(_licenseDialog) || Open(_failureDialog)) return;
+        if (!EGlobal.Instance.IsValid() || IsOpen(_welcomeDialog) || IsOpen(_licenseDialog) || IsOpen(_failureDialog)) return;
         if (EGlobal.Instance.TakeWelcomes() is not { Count: > 0 } welcomes) return;
         try
         {
@@ -147,21 +164,62 @@ public sealed partial class EPluginPlugin : EditorPlugin, IEPlugin, ISerializati
         }
     }
 
+    /// <summary>
+    /// Suggests cleaning up a local directory that holds more than the user set, after the scheduled update check and
+    /// once no other ePlugin dialog is open.
+    /// </summary>
+    private void ShowCleanupSuggestion()
+    {
+        if (!EGlobal.Instance.IsValid() || IsOpen(_cleanupDialog) || IsOpen(_welcomeDialog) || IsOpen(_licenseDialog) || IsOpen(_failureDialog)) return;
+        if (EGlobal.Instance.TakeCleanupSuggestion() is not { } suggestion) return;
+        try
+        {
+            _cleanupDialog = CleanupSuggestionDialog.Create(suggestion, cleanUp =>
+            {
+                _cleanupDialog = null;
+                // Opened once this dialog is gone; a method callable, which Godot resolves after an assembly reload too.
+                if (cleanUp) CallDeferred(MethodName.OpenLocalCleanup, suggestion.Directory);
+            });
+            _cleanupDialog.Open();
+        }
+        catch (Exception ex)
+        {
+            Logger.Error($"Cannot show the cleanup suggestion: {ex.Message}");
+            _cleanupDialog = null;
+        }
+    }
+
+    /// <summary>Opens the ePlugin Manager and its settings on the Tools tab, cleaning up <paramref name="directory"/>.</summary>
+    private void OpenLocalCleanup(string directory)
+    {
+        OpenManager();
+        if (_managerDialog is not null && GodotObject.IsInstanceValid(_managerDialog)) _managerDialog.OpenSettings(directory);
+    }
+
     public override void _DisablePlugin()
     {
         RemoveManagerUi();
         EGlobal.Instance.RecordFrameworkDisabled(this);
         // plugins toggled while the framework is disabled are not handled when it is enabled again
         EGlobal.ForgetPluginToggles();
+        EGlobal.ForgetLicenseDecisions();
+        EGlobal.ForgetUnsavedState();
         // Godot frees this instance; the one it creates when the framework is enabled again initializes it anew.
         EGlobal.Detach(this);
 
         base._DisablePlugin();
     }
 
+    public override void _EnterTree()
+    {
+        base._EnterTree();
+        AddExportFilter();
+    }
+
     public override void _ExitTree()
     {
         RemoveManagerUi();
+        RemoveExportFilter();
         _updateLifetime.Cancel();
         _updateLifetime.Dispose();
 
@@ -203,13 +261,16 @@ public sealed partial class EPluginPlugin : EditorPlugin, IEPlugin, ISerializati
         RemoveManagerButton();
         _managerButton = new Button
         {
-            Name = "EPluginManagerButton", Flat = true, TooltipText = "ePlugin Manager",
+            Name = "EPluginManagerButton", Flat = true, TooltipText = ManagerTooltip(_managerStatus),
             FocusMode = Control.FocusModeEnum.None,
-            Icon = EditorIcons.EPlugin
+            Icon = EditorIcons.Manager(_managerStatus)
         };
         if (_managerButton.Icon is null) _managerButton.Text = "ePlugin";
         _managerSignals.Connect(_managerButton, Control.SignalName.ThemeChanged, Callable.From(() => CallDeferred(nameof(RefreshManagerIcon))));
         _managerSignals.Connect(_managerButton, BaseButton.SignalName.Pressed, Callable.From(OpenManager));
+        var settingsChanged = new Callable(this, MethodName.OnSettingsChanged);
+        if (!ProjectSettings.Singleton.IsConnected(ProjectSettings.SignalName.SettingsChanged, settingsChanged))
+            _managerSignals.Connect(ProjectSettings.Singleton, ProjectSettings.SignalName.SettingsChanged, settingsChanged);
         AddControlToContainer(CustomControlContainer.Toolbar, _managerButton);
         Engine.Singleton.SetMeta(ManagerButtonMeta, _managerButton.GetInstanceId());
         _managerUiAdded = true;
@@ -217,12 +278,35 @@ public sealed partial class EPluginPlugin : EditorPlugin, IEPlugin, ISerializati
         if (RemoveStaleManagerDialog()) CallDeferred(MethodName.OpenManager);
     }
 
+    /// <summary>Godot emits settings_changed once in the frame after settings changed, also when a plugin was toggled.</summary>
+    private void OnSettingsChanged() => _pluginTogglesDue = true;
+
     private void RefreshManagerIcon()
     {
         if (_managerButton is null || !GodotObject.IsInstanceValid(_managerButton)) return;
-        _managerButton.Icon = EditorIcons.EPlugin;
+        _managerButton.Icon = EditorIcons.Manager(_managerStatus);
         _managerButton.Text = _managerButton.Icon is null ? "ePlugin" : "";
+        _managerButton.TooltipText = ManagerTooltip(_managerStatus);
     }
+
+    /// <summary>Colors the puzzle piece of the toolbar button while updates can be installed or a plugin needs attention.</summary>
+    private void ShowManagerStatus()
+    {
+        if (!_managerUiAdded || !EGlobal.Instance.IsValid()) return;
+        var status = EGlobal.Instance.CurrentManagerStatus();
+        if (status == _managerStatus) return;
+        _managerStatus = status;
+        RefreshManagerIcon();
+    }
+
+    private string ManagerTooltip(ManagerStatus status) => _startupError is not null && !EGlobal.Instance.IsValid()
+        ? "ePlugin could not start.\nClick to see why and to try again."
+        : status switch
+    {
+        ManagerStatus.UpdatesAvailable => "ePlugin Manager\nPlugin updates are available.",
+        ManagerStatus.NeedsAttention => "ePlugin Manager\nA plugin needs attention.",
+        _ => "ePlugin Manager"
+    };
     /// <summary>Releases a dialog whose C# state was lost to an assembly reload; returns whether it was showing.</summary>
     private bool RemoveStaleManagerDialog()
     {
@@ -250,9 +334,32 @@ public sealed partial class EPluginPlugin : EditorPlugin, IEPlugin, ISerializati
         if (Engine.Singleton.HasMeta(ManagerButtonMeta)) Engine.Singleton.RemoveMeta(ManagerButtonMeta);
         _managerButton = null;
     }
+    /// <summary>
+    /// Leaves the framework's editor-only files out of exports. Godot keeps the export plugin across assembly reloads,
+    /// which do not run this again, and reloads its script; its instance id is kept in Engine metadata like the button's.
+    /// </summary>
+    private void AddExportFilter()
+    {
+        RemoveExportFilter();
+        var filter = new ExportFilter();
+        AddExportPlugin(filter);
+        Engine.Singleton.SetMeta(ExportFilterMeta, filter.GetInstanceId());
+    }
+
+    private void RemoveExportFilter()
+    {
+        if (!Engine.Singleton.HasMeta(ExportFilterMeta)) return;
+        if (GodotObject.InstanceFromId(Engine.Singleton.GetMeta(ExportFilterMeta).AsUInt64()) is EditorExportPlugin filter) RemoveExportPlugin(filter);
+        Engine.Singleton.RemoveMeta(ExportFilterMeta);
+    }
+
     private void OpenManager()
     {
-        if (!EGlobal.Instance.IsValid()) return;
+        if (!EGlobal.Instance.IsValid())
+        {
+            if (_startupError is not null) ShowStartupFailure();
+            return;
+        }
         if (_managerDialog is null || !GodotObject.IsInstanceValid(_managerDialog) || !_managerDialog.IsInitialized)
         {
             RemoveStaleManagerDialog();
@@ -261,6 +368,20 @@ public sealed partial class EPluginPlugin : EditorPlugin, IEPlugin, ISerializati
         }
         _managerDialog.Open();
     }
+    private StartupFailureDialog? _startupDialog;
+
+    /// <summary>Shows why ePlugin could not start; Retry now starts it again on the next frame.</summary>
+    private void ShowStartupFailure()
+    {
+        if (_startupError is not { } error || IsOpen(_startupDialog)) return;
+        var details = $"ePlugin Framework {this.ReadMetadata()?.Version ?? "unknown version"}, Godot {Engine.GetVersionInfo()["string"]}, " +
+                      $".NET {System.Environment.Version}, {System.Runtime.InteropServices.RuntimeInformation.OSDescription}\n" +
+                      $"Failed starts in a row: {_startupFailures}\n\n{error}";
+        _startupDialog = StartupFailureDialog.Create(error.Message, details, () => _nextInitializeAttempt = DateTime.MinValue);
+        EditorInterface.Singleton.GetBaseControl().AddChild(_startupDialog);
+        _startupDialog.Open();
+    }
+
     private void ShowUpdateFailure(UpdateJournal journal)
     {
         try
@@ -281,9 +402,9 @@ public sealed partial class EPluginPlugin : EditorPlugin, IEPlugin, ISerializati
             _updateOwner.RestartRequested -= RememberManagerForRestart;
         }
         ReleaseReopenProgress();
-        foreach (var dialog in new Window?[] { _managerDialog, _failureDialog, _licenseDialog, _welcomeDialog })
+        foreach (var dialog in new Window?[] { _managerDialog, _failureDialog, _licenseDialog, _welcomeDialog, _cleanupDialog })
             if (dialog is not null) EditorWindows.Release(dialog);
-        _managerDialog = null; _failureDialog = null; _licenseDialog = null; _welcomeDialog = null;
+        _managerDialog = null; _failureDialog = null; _licenseDialog = null; _welcomeDialog = null; _cleanupDialog = null;
     }
 
     private static void RestoreEarlyUpdateSettings()
@@ -307,8 +428,9 @@ public sealed partial class EPluginPlugin : EditorPlugin, IEPlugin, ISerializati
             if (ActivationProgress.ResumeAfterRestart())
                 _reopenProgress = ActivationProgress.Begin("Finishing the plugin update...");
             Engine.Singleton.SetMeta(recoveryKey, false);
-            var recovery = UpdateRecovery.RunIfNeeded(ProjectSettings.GlobalizePath("res://"), Logger,
-                () => new DotnetVersionManager(Logger, EnableDebugLogging).Create(Logger) is ICheckedDotnetCli cli && cli.TryBuild().ExitCode == 0,
+            var host = EGlobal.Instance.Host;
+            var recovery = UpdateRecovery.RunIfNeeded(host.ProjectRoot, Logger,
+                () => new DotnetVersionManager(Logger, EnableDebugLogging).Create(Logger, host.ProjectRoot, host.AssemblyName, host.SolutionDirectory) is ICheckedDotnetCli cli && cli.TryBuild().ExitCode == 0,
                 RestoreEarlyUpdateSettings);
             if (recovery != UpdateRecovery.Outcome.Continue)
             {
@@ -316,7 +438,7 @@ public sealed partial class EPluginPlugin : EditorPlugin, IEPlugin, ISerializati
                 if (recovery == UpdateRecovery.Outcome.Restart)
                 {
                     ActivationProgress.PrepareForRestart();
-                    EditorInterface.Singleton.CallDeferred(EditorInterface.MethodName.RestartEditor, true);
+                    host.RestartEditor();
                 }
                 ReleaseReopenProgress();
             }
@@ -328,6 +450,8 @@ public sealed partial class EPluginPlugin : EditorPlugin, IEPlugin, ISerializati
     {
         if (!EnsureEarlyUpdateRecovery() || DateTime.UtcNow < _nextInitializeAttempt) return;
         _managerUiAdded = false;
+        // a plugin toggled between a build and its reload is found against the toggles kept in Engine metadata
+        _pluginTogglesDue = true;
         _updateOwner = EGlobal.Instance;
         _updateOwner.UpdateDecisionNeeded -= ShowUpdateFailure;
         _updateOwner.UpdateDecisionNeeded += ShowUpdateFailure;
@@ -341,6 +465,7 @@ public sealed partial class EPluginPlugin : EditorPlugin, IEPlugin, ISerializati
         }
         UpdateSettings.Register();
         LicenseSettings.Register();
+        WelcomeSettings.Register();
         LoggingSettings.Register();
         // A reconnected window spans recovery and initialization. If the manager was open, let it draw before closing.
         var progress = _reopenProgress ?? (ManagerReopen.IsSet ? ActivationProgress.Begin("Finishing the plugin update...") : null);
@@ -348,12 +473,24 @@ public sealed partial class EPluginPlugin : EditorPlugin, IEPlugin, ISerializati
         try { EGlobal.Instance.Initialize(this, new GenericLoggerFactory(category => new GodotConsoleLogger(category))); }
         catch (Exception ex)
         {
-            // EGlobal stays invalid; trying again every frame would only repeat the error.
+            // EGlobal stays invalid; trying again every frame would only repeat the error, and so would a full stack trace
+            // every few seconds: it is logged when the error changes, and the attempts back off.
             progress?.Dispose();
-            _nextInitializeAttempt = DateTime.UtcNow + InitializeRetryDelay;
-            Logger.Error($"ePlugin could not start and tries again in {InitializeRetryDelay.TotalSeconds:0} seconds: {ex}");
+            var repeated = _startupError?.ToString() == ex.ToString();
+            _startupError = ex;
+            _startupFailures++;
+            var delay = TimeSpan.FromTicks(Math.Min(MaxInitializeRetryDelay.Ticks, InitializeRetryDelay.Ticks << Math.Min(_startupFailures - 1, 10)));
+            _nextInitializeAttempt = DateTime.UtcNow + delay;
+            if (repeated)
+                Logger.Error($"ePlugin still cannot start ({ex.Message}); it tries again in {delay.TotalSeconds:0} seconds.");
+            else
+                Logger.Error($"ePlugin could not start and tries again in {delay.TotalSeconds:0} seconds. Its toolbar button shows this error. {ex}");
+            _managerStatus = ManagerStatus.NeedsAttention;
+            AddManagerUi();
             return;
         }
+        _startupError = null;
+        _startupFailures = 0;
         if (progress is null) return;
         // Another restart follows, e.g. after the interim build: the manager opens after that one.
         if (EGlobal.Instance.IsRestartPending) { progress.Dispose(); return; }

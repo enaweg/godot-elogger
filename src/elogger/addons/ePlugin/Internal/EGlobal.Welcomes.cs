@@ -19,8 +19,7 @@ internal sealed partial class EGlobal
     /// <summary>
     /// No plugin is being enabled, disabled or updated, so the welcome pages of the installed plugins can be shown.
     /// </summary>
-    private bool WelcomeQuiet => _transition is null && _toCheckEnable.Count == 0 && _toCheckDisable.Count == 0 &&
-                                 _recipeUpdateJournal is null && _pendingLicenseReview is null;
+    private bool WelcomeQuiet => !IsChangingPlugins && _recipeUpdateJournal is null && _pendingLicenseReview is null;
 
     /// <summary>
     /// The welcome pages of enabled plugins that were not shown for the project yet. Called every frame; looks for new
@@ -36,7 +35,7 @@ internal sealed partial class EGlobal
         }
 
         _nextWelcomeCheck = frame + WelcomeCheckFrames;
-        if (_stateStore is null || _stateStore.IsReadOnly || !LicenseUiAvailable || !WelcomeQuiet)
+        if (WelcomeSettings.Hide || _stateStore is null || _stateStore.IsReadOnly || !LicenseUiAvailable || !WelcomeQuiet)
         {
             return null;
         }
@@ -85,7 +84,7 @@ internal sealed partial class EGlobal
             return true;
         }
 
-        var context = _contexts.FirstOrDefault(c => c.Slug == slug && c.Plugin is not null);
+        var context = ManagedContext(slug);
         return context?.State == EEditorPluginState.Activated || context is null && !IsManagedPlugin(slug);
     }
 
@@ -115,7 +114,10 @@ internal sealed partial class EGlobal
     }
 
     /// <summary>The welcome page the ePlugin Manager links in a plugin's details; null when the plugin has none.</summary>
-    internal WelcomeEntry? DescribeWelcome(string slug) => ReadInstalledWelcome(slug, RecipeOf(slug));
+    internal WelcomeEntry? DescribeWelcome(string slug) => ReadInstalledWelcome(slug, RecipeOf(slug)) ??
+        // a GDExtension add-on has no plugin.cfg, but may have a README; it is linked, never shown on its own
+        (IsExtensionAddon(slug) ? PluginWelcome.FromConfig(slug, KnownPluginOf(slug)?.Name ?? slug, ExtensionAddonVersion(slug) ?? "", null,
+            ProjectSettings.GlobalizePath(_host.PluginDirectory(slug))) : null);
 
     /// <summary>Records the welcome pages of a closed welcome dialog as shown, so they are not shown again.</summary>
     internal void CompleteWelcomes(IEnumerable<WelcomeEntry> shown)
@@ -127,6 +129,7 @@ internal sealed partial class EGlobal
             return;
         }
 
+        Stash(UnsavedWelcomesMeta, welcomes);
         _ePluginContext?.Logger.Warn(
             "Shown welcome pages could not be saved to addons/eplugin-state.json; they are shown again after the editor restarts.");
     }

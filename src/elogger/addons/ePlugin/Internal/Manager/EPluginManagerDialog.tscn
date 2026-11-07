@@ -1,9 +1,9 @@
 [gd_scene load_steps=6 format=3]
 
 [ext_resource type="Script" uid="uid://bvv1rdcwentgp" path="res://addons/ePlugin/Internal/Manager/EPluginManagerDialog.cs" id="1_script"]
-[ext_resource type="Texture2D" uid="uid://c0e8d5lpm8fxh" path="res://addons/ePlugin/icons/update.svg" id="2_update"]
-[ext_resource type="PackedScene" path="res://addons/ePlugin/Internal/Manager/LocalSourcesDialog.tscn" id="3_local"]
-[ext_resource type="PackedScene" path="res://addons/ePlugin/Internal/Manager/UpdateSitesDialog.tscn" id="4_sites"]
+[ext_resource type="Texture2D" uid="uid://sbphlpbrf2br" path="res://addons/ePlugin/icons/rescan.svg" id="2_rescan"]
+[ext_resource type="PackedScene" path="res://addons/ePlugin/Internal/Manager/SettingsDialog.tscn" id="3_settings"]
+[ext_resource type="PackedScene" path="res://addons/ePlugin/Internal/Manager/AttentionDialog.tscn" id="4_attention"]
 
 [sub_resource type="StyleBoxEmpty" id="StyleBoxEmpty_details"]
 
@@ -11,54 +11,63 @@
 auto_translate_mode = 2
 title = "ePlugin Manager"
 initial_position = 2
-size = Vector2i(1000, 600)
+size = Vector2i(1200, 800)
 min_size = Vector2i(760, 420)
 ok_button_text = "Update"
 dialog_hide_on_ok = false
-cancel_button_text = "Close"
+cancel_button_text = "Cancel"
 script = ExtResource("1_script")
 
 [node name="Content" type="VBoxContainer" parent="."]
 offset_left = 8.0
 offset_top = 8.0
-offset_right = 992.0
-offset_bottom = 551.0
+offset_right = 1192.0
+offset_bottom = 751.0
 theme_override_constants/separation = 8
 
 [node name="Header" type="HBoxContainer" parent="Content"]
 layout_mode = 2
 
-[node name="Status" type="Label" parent="Content/Header"]
-unique_name_in_owner = true
+[node name="Note" type="Label" parent="Content/Header"]
+custom_minimum_size = Vector2(300, 0)
 layout_mode = 2
 size_flags_horizontal = 3
-text = "Last checked: never"
-text_overrun_behavior = 3
+text = "Selected addons will be replaced. Open scenes are saved first.
+Files and project references are backed up and restored if installation fails."
+autowrap_mode = 3
 
-[node name="RetryButton" type="Button" parent="Content/Header"]
+[node name="AttentionButton" type="Button" parent="Content/Header"]
+unique_name_in_owner = true
+visible = false
+layout_mode = 2
+size_flags_vertical = 4
+tooltip_text = "Show the plugins whose activation, deactivation or update failed or was interrupted, or that run with a problem, and decide what to do about each."
+text = "1 plugin needs attention"
+
+[node name="InstallZipButton" type="Button" parent="Content/Header"]
 unique_name_in_owner = true
 layout_mode = 2
-tooltip_text = "Retry plugin activations, deactivations and updates that failed or were interrupted."
-text = "Retry failed"
-
-[node name="LocalSourcesButton" type="Button" parent="Content/Header"]
-unique_name_in_owner = true
-layout_mode = 2
-tooltip_text = "Manage your local plugin directories. Plugin ZIP files in them are offered as updates and versions."
-text = "Local directories..."
-
-[node name="UpdateSitesButton" type="Button" parent="Content/Header"]
-unique_name_in_owner = true
-layout_mode = 2
-tooltip_text = "Set update sites for plugins in this project, and review ePlugin's built-in list of add-on update sites. A project's site replaces a plugin's plugin.cfg update_url, which stays the fallback."
-text = "Update sites..."
+size_flags_vertical = 4
+tooltip_text = "Install from ZIP
+Install a plugin from a ZIP file, such as one downloaded from the Godot Asset Library. A ZIP file of a plugin that is installed already installs its version over it, like an update."
+flat = true
 
 [node name="CheckButton" type="Button" parent="Content/Header"]
 unique_name_in_owner = true
 layout_mode = 2
-tooltip_text = "Check every plugin with an update_url for a new version now, and index the local plugin directories again."
-text = "Check for updates"
-icon = ExtResource("2_update")
+size_flags_vertical = 4
+tooltip_text = "Check for updates
+Check every plugin with an update_url for a new version now, and index the local directories again."
+icon = ExtResource("2_rescan")
+flat = true
+
+[node name="SettingsButton" type="Button" parent="Content/Header"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_vertical = 4
+tooltip_text = "Settings
+Change ePlugin's project settings and update sources (update sites for plugins in this project and your local directories), and see the ePlugin Framework's version and links."
+flat = true
 
 [node name="Split" type="HSplitContainer" parent="Content"]
 layout_mode = 2
@@ -69,7 +78,7 @@ unique_name_in_owner = true
 custom_minimum_size = Vector2(420, 0)
 layout_mode = 2
 size_flags_horizontal = 3
-columns = 5
+columns = 3
 column_titles_visible = true
 hide_root = true
 select_mode = 1
@@ -77,20 +86,26 @@ select_mode = 1
 [node name="Details" type="MarginContainer" parent="Content/Split"]
 custom_minimum_size = Vector2(300, 0)
 layout_mode = 2
+size_flags_horizontal = 3
 
-[node name="DetailsBox" type="VBoxContainer" parent="Content/Split/Details"]
+[node name="DetailsScroll" type="ScrollContainer" parent="Content/Split/Details"]
 layout_mode = 2
 
-[node name="DetailsHeader" type="HBoxContainer" parent="Content/Split/Details/DetailsBox"]
+[node name="DetailsBox" type="VBoxContainer" parent="Content/Split/Details/DetailsScroll"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+
+[node name="DetailsHeader" type="HBoxContainer" parent="Content/Split/Details/DetailsScroll/DetailsBox"]
 layout_mode = 2
 
-[node name="DetailsIcon" type="TextureRect" parent="Content/Split/Details/DetailsBox/DetailsHeader"]
+[node name="DetailsIcon" type="TextureRect" parent="Content/Split/Details/DetailsScroll/DetailsBox/DetailsHeader"]
 unique_name_in_owner = true
 layout_mode = 2
 size_flags_vertical = 4
 stretch_mode = 5
 
-[node name="DetailsName" type="Label" parent="Content/Split/Details/DetailsBox/DetailsHeader"]
+[node name="DetailsName" type="Label" parent="Content/Split/Details/DetailsScroll/DetailsBox/DetailsHeader"]
 unique_name_in_owner = true
 custom_minimum_size = Vector2(200, 0)
 layout_mode = 2
@@ -99,16 +114,16 @@ theme_type_variation = &"HeaderMedium"
 text = "No plugin selected"
 autowrap_mode = 3
 
-[node name="LocationRow" type="HBoxContainer" parent="Content/Split/Details/DetailsBox"]
+[node name="LocationRow" type="HBoxContainer" parent="Content/Split/Details/DetailsScroll/DetailsBox"]
 unique_name_in_owner = true
 visible = false
 layout_mode = 2
 
-[node name="LocationLabel" type="Label" parent="Content/Split/Details/DetailsBox/LocationRow"]
+[node name="LocationLabel" type="Label" parent="Content/Split/Details/DetailsScroll/DetailsBox/LocationRow"]
 layout_mode = 2
 text = "Location:"
 
-[node name="LocationLink" type="LinkButton" parent="Content/Split/Details/DetailsBox/LocationRow"]
+[node name="LocationLink" type="LinkButton" parent="Content/Split/Details/DetailsScroll/DetailsBox/LocationRow"]
 unique_name_in_owner = true
 layout_mode = 2
 size_flags_horizontal = 3
@@ -116,75 +131,118 @@ size_flags_vertical = 4
 tooltip_text = "Select this folder in the FileSystem dock."
 text = "res://addons"
 
-[node name="OpenFolderButton" type="Button" parent="Content/Split/Details/DetailsBox/LocationRow"]
+[node name="OpenFolderButton" type="Button" parent="Content/Split/Details/DetailsScroll/DetailsBox/LocationRow"]
 unique_name_in_owner = true
 layout_mode = 2
 tooltip_text = "Show this folder in the system file manager."
 text = "Open"
 flat = true
 
-[node name="DetailsText" type="RichTextLabel" parent="Content/Split/Details/DetailsBox"]
+[node name="DetailsText" type="RichTextLabel" parent="Content/Split/Details/DetailsScroll/DetailsBox"]
 unique_name_in_owner = true
 layout_mode = 2
 size_flags_vertical = 3
 focus_mode = 2
+theme_override_constants/line_separation = 6
 theme_override_styles/normal = SubResource("StyleBoxEmpty_details")
 bbcode_enabled = true
 text = "Select a plugin to see its details."
 context_menu_enabled = true
 selection_enabled = true
 
-[node name="ReleaseButton" type="Button" parent="Content/Split/Details/DetailsBox"]
+[node name="ReleaseButton" type="Button" parent="Content/Split/Details/DetailsScroll/DetailsBox"]
 unique_name_in_owner = true
 visible = false
 layout_mode = 2
 tooltip_text = "Open the release page of the available update in the browser."
 text = "Open release page"
 
-[node name="VersionSeparator" type="HSeparator" parent="Content/Split/Details/DetailsBox"]
+[node name="VersionSeparator" type="HSeparator" parent="Content/Split/Details/DetailsScroll/DetailsBox"]
 unique_name_in_owner = true
 visible = false
 layout_mode = 2
 
-[node name="VersionRow" type="HBoxContainer" parent="Content/Split/Details/DetailsBox"]
+[node name="VersionRow" type="HBoxContainer" parent="Content/Split/Details/DetailsScroll/DetailsBox"]
 unique_name_in_owner = true
 visible = false
 layout_mode = 2
 
-[node name="VersionLabel" type="Label" parent="Content/Split/Details/DetailsBox/VersionRow"]
+[node name="VersionLabel" type="Label" parent="Content/Split/Details/DetailsScroll/DetailsBox/VersionRow"]
 layout_mode = 2
 text = "Version:"
 
-[node name="VersionSelect" type="OptionButton" parent="Content/Split/Details/DetailsBox/VersionRow"]
+[node name="VersionSelect" type="OptionButton" parent="Content/Split/Details/DetailsScroll/DetailsBox/VersionRow"]
 unique_name_in_owner = true
 layout_mode = 2
 size_flags_horizontal = 3
 tooltip_text = "All published versions. Choose an older one to undo an update that broke the project."
 clip_text = true
 
-[node name="InstallVersionButton" type="Button" parent="Content/Split/Details/DetailsBox/VersionRow"]
+[node name="InstallVersionButton" type="Button" parent="Content/Split/Details/DetailsScroll/DetailsBox/VersionRow"]
 unique_name_in_owner = true
 layout_mode = 2
 disabled = true
 text = "Update"
 
-[node name="VersionHint" type="Label" parent="Content/Split/Details/DetailsBox"]
+[node name="VersionHint" type="Label" parent="Content/Split/Details/DetailsScroll/DetailsBox"]
 unique_name_in_owner = true
 visible = false
+custom_minimum_size = Vector2(200, 0)
 modulate = Color(1, 1, 1, 0.7)
 layout_mode = 2
 autowrap_mode = 3
 
-[node name="Note" type="Label" parent="Content"]
-layout_mode = 2
-text = "Selected addons will be replaced. Open scenes are saved first.
-Files and project references are backed up and restored if installation fails."
-
-[node name="TrustCheck" type="CheckBox" parent="Content"]
+[node name="RetryVersionsButton" type="LinkButton" parent="Content/Split/Details/DetailsScroll/DetailsBox"]
 unique_name_in_owner = true
 visible = false
 layout_mode = 2
-text = "I trust the changed update source"
+size_flags_horizontal = 0
+tooltip_text = "Load the versions published at the update site again."
+text = "Load versions again"
+
+[node name="ErrorBox" type="HBoxContainer" parent="Content"]
+unique_name_in_owner = true
+visible = false
+layout_mode = 2
+
+[node name="ErrorText" type="RichTextLabel" parent="Content/ErrorBox"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(300, 64)
+layout_mode = 2
+size_flags_horizontal = 3
+focus_mode = 2
+bbcode_enabled = true
+context_menu_enabled = true
+selection_enabled = true
+
+[node name="ErrorButtons" type="VBoxContainer" parent="Content/ErrorBox"]
+layout_mode = 2
+
+[node name="CopyErrorButton" type="Button" parent="Content/ErrorBox/ErrorButtons"]
+unique_name_in_owner = true
+layout_mode = 2
+tooltip_text = "Copy the error message and where its logs are, e.g. for a bug report."
+text = "Copy details"
+
+[node name="OpenLogButton" type="Button" parent="Content/ErrorBox/ErrorButtons"]
+unique_name_in_owner = true
+visible = false
+layout_mode = 2
+tooltip_text = "Show the logs of the failure in the system file manager."
+text = "Open log folder"
+
+[node name="Footer" type="HBoxContainer" parent="Content"]
+layout_mode = 2
+
+[node name="Status" type="Label" parent="Content/Footer"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(200, 0)
+layout_mode = 2
+size_flags_horizontal = 3
+mouse_filter = 1
+text = "Last checked: never · Next check: at the next editor start"
+horizontal_alignment = 2
+text_overrun_behavior = 3
 
 [node name="DisableFrameworkConfirm" type="ConfirmationDialog" parent="."]
 unique_name_in_owner = true
@@ -205,8 +263,37 @@ size = Vector2i(520, 200)
 ok_button_text = "Install"
 dialog_autowrap = true
 
-[node name="LocalSourcesDialog" parent="." instance=ExtResource("3_local")]
+[node name="SettingsDialog" parent="." instance=ExtResource("3_settings")]
 unique_name_in_owner = true
 
-[node name="UpdateSitesDialog" parent="." instance=ExtResource("4_sites")]
+[node name="AttentionDialog" parent="." instance=ExtResource("4_attention")]
 unique_name_in_owner = true
+
+[node name="InstallZipDialog" type="FileDialog" parent="."]
+unique_name_in_owner = true
+title = "Install a plugin from a ZIP file"
+initial_position = 2
+size = Vector2i(720, 480)
+ok_button_text = "Open"
+mode_overrides_title = false
+file_mode = 0
+access = 2
+filters = PackedStringArray("*.zip ; ZIP files")
+
+[node name="InstallConfirm" type="ConfirmationDialog" parent="."]
+unique_name_in_owner = true
+title = "Install plugin from ZIP file"
+initial_position = 2
+size = Vector2i(600, 320)
+ok_button_text = "Install"
+
+[node name="InstallText" type="RichTextLabel" parent="InstallConfirm"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(560, 200)
+offset_left = 8.0
+offset_top = 8.0
+offset_right = 592.0
+offset_bottom = 271.0
+bbcode_enabled = true
+context_menu_enabled = true
+selection_enabled = true

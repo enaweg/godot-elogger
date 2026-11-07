@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Enaweg.Plugin.Internal.Kinds;
 using Enaweg.Plugin.Internal.Update;
 using Godot;
 
@@ -15,21 +16,26 @@ internal sealed partial class EGlobal
 {
     private UpdateStateStore? _updateCache;
     private UpdateService? _updateService;
-    private bool _checkingUpdates;
+    private readonly UpdateCheckGate _updateChecks = new();
     private IReadOnlyList<UpdateCandidate> _remoteUpdates = [];
     /// <summary>
-    /// The highest known version per plugin, from its update_url or from the local plugin directories, without a release
+    /// The highest known version per plugin, from its update_url or from the local directories, without a release
     /// that is installed already.
     /// </summary>
     public IReadOnlyList<UpdateCandidate> PendingUpdates => UpdateService.Merge(UpdateService.WithoutInstalled(_remoteUpdates, _updateCache?.State.Revisions), _localUpdates);
     internal DateTimeOffset? LastUpdateCheck => _updateCache?.State.LastCheckUtc;
+    /// <summary>See <see cref="UpdateScheduler.NextCheck"/>.</summary>
+    internal DateTimeOffset? NextUpdateCheck => UpdateScheduler.NextCheck(LastUpdateCheck, ScheduledChecksEnabled, CheckIntervalHours);
+    private static bool ScheduledChecksEnabled => ProjectSettings.GetSetting("eplugin/updates/check_enabled", true).AsBool();
+    private static double CheckIntervalHours => ProjectSettings.GetSetting("eplugin/updates/check_interval_hours", 20).AsDouble();
     internal UpdateCache? UpdateCache => _updateCache?.State;
 
     private void InitializeUpdates(EPluginPlugin plugin)
     {
-        _updateCache ??= new UpdateStateStore(Path.Combine(ProjectSettings.GlobalizePath("res://.godot/eplugin"), "update-state.json"));
+        _updateCache ??= new UpdateStateStore(Path.Combine(UpdateProjectRoot, ".godot/eplugin/update-state.json"), m => _ePluginContext?.Logger?.Warn(m));
         _updateCache.Load();
-        _updateService = new UpdateService(new UpdateSourceFactory(), new SystemClock(), _updateCache);
+        // The update applier changes the cache on the editor thread, so checks write their results there too.
+        _updateService = new UpdateService(new UpdateSourceFactory(log: m => Post(() => _ePluginContext?.Logger?.Warn(m))), new SystemClock(), _updateCache, OnEditorThread);
         InitializeUpdateSites();
         InitializeLocalSources();
         _remoteUpdates = UpdateScheduler.CurrentCached(_updateCache.State, CollectUpdateTargets());
@@ -43,8 +49,11 @@ internal sealed partial class EGlobal
 
     private async Task IndexThenCheckAsync(bool check)
     {
+        // The sizes of the local directories are checked when the update check is due, decided before it records its run.
+        var cleanup = check && UpdateScheduler.ShouldCheck(DateTimeOffset.UtcNow, LastUpdateCheck, ScheduledChecksEnabled, CheckIntervalHours);
         await RebuildLocalIndexAsync();
         if (check) await CheckForUpdatesAsync();
+        if (cleanup) ScheduleCleanupCheck();
     }
 
     /// <summary>Re-reads installed versions after an update so neither source keeps offering what is installed now.</summary>
@@ -56,38 +65,62 @@ internal sealed partial class EGlobal
     }
 
     /// <summary>
-    /// Every enabled plugin with a readable plugin.cfg, with the update site the project sets for it. Plugins without
-    /// an update site can still be updated from the local plugin directories; remote checks skip them.
+    /// Every enabled plugin with a readable plugin.cfg and every GDExtension add-on, with the update site the project sets
+    /// for it. Plugins without an update site can still be updated from the local directories; remote checks skip
+    /// them. Plugins and add-ons in a subfolder of the addons folder are left out: updates find and install a package's
+    /// folder by its slug directly below the addons folder.
     /// </summary>
     internal IReadOnlyList<PluginUpdateTarget> CollectUpdateTargets()
     {
         RefreshPlainPlugins();
         ReloadUpdateSites();
-        return GetEnabledPluginSlugs().Select(slug =>
+        var enabled = GetEnabledPluginSlugs();
+        return enabled.Where(slug => !AddonLayout.IsNested(slug)).Select(slug =>
         {
-            var directory = $"res://addons/{slug}";
+            var directory = _host.PluginDirectory(slug);
             var metadata = EditorPluginExtensions.ReadMetadata(directory + "/plugin.cfg");
             return metadata is null ? null : new PluginUpdateTarget(slug, metadata.Name,
                 metadata.Version, metadata.UpdateUrl, ProjectSettings.GlobalizePath(directory),
                 _stateStore?.IsBlocked(slug) == true, _stateStore?.IsReadOnly != false, _stateStore?.GetShared(slug)?.Version,
-                UpdateSiteOf(slug), KnownPluginOf(slug)?.UpdateUrl);
-        }).Where(t => t is not null).Cast<PluginUpdateTarget>().ToArray();
+                UpdateSiteOf(slug), KnownPluginOf(slug)?.UpdateUrl,
+                slug == FrameworkSlug ? PluginKind.Framework : IsManagedPlugin(slug) ? PluginKind.EPlugin : PluginKind.Unknown,
+                PluginRepositoryOf(slug))
+            {
+                // the update replaces them with the plugin's files, see AddonPackageValidator.SubPluginFindings
+                EnabledSubPlugins = enabled.Where(s => s.StartsWith(slug + "/", StringComparison.Ordinal)).Select(s => s[(slug.Length + 1)..])
+                    .Order(StringComparer.Ordinal).ToArray()
+            };
+        }).Where(t => t is not null).Cast<PluginUpdateTarget>()
+            .Concat(ExtensionAddonSlugs().Where(slug => !AddonLayout.IsNested(slug)).Select(ExtensionAddonTarget)).ToArray();
     }
 
-    public async Task<UpdateCheckResult> CheckForUpdatesAsync(bool force = false)
+    /// <summary>How the folder of <paramref name="slug"/> is under git version control, see <see cref="PluginRepository"/>.</summary>
+    internal PluginRepository PluginRepositoryOf(string slug) =>
+        PluginRepository.Detect(ProjectSettings.GlobalizePath(_host.PluginDirectory(slug)), _host.ProjectRoot);
+
+    /// <summary>
+    /// Checks for updates; <paramref name="force"/> for a manual check. See <see cref="UpdateCheckGate"/> for a check
+    /// started while another one runs.
+    /// </summary>
+    public Task<UpdateCheckResult> CheckForUpdatesAsync(bool force = false)
+    {
+        if (_updateService is null || _updateCache is null || _ePluginContext is null)
+            return Task.FromResult(new UpdateCheckResult([], [], DateTimeOffset.UtcNow));
+        return _updateChecks.RunAsync(force, RunUpdateCheckAsync, () => new(PendingUpdates, [], LastUpdateCheck ?? DateTimeOffset.UtcNow));
+    }
+
+    private async Task<UpdateCheckResult> RunUpdateCheckAsync(bool force)
     {
         if (_updateService is null || _updateCache is null || _ePluginContext is null)
             return new([], [], DateTimeOffset.UtcNow);
-        if (_checkingUpdates) return new(PendingUpdates, [], LastUpdateCheck ?? DateTimeOffset.UtcNow);
-        _checkingUpdates = true;
         var ct = _ePluginContext.UpdateLifetime;
         try
         {
-            // A manual check also finds ZIP files added to the local plugin directories since they were indexed.
+            // A manual check also finds ZIP files added to the local directories since they were indexed.
             if (force) await RebuildLocalIndexAsync();
             var targets = CollectUpdateTargets();
-            var enabled = ProjectSettings.GetSetting("eplugin/updates/check_enabled", true).AsBool();
-            var interval = ProjectSettings.GetSetting("eplugin/updates/check_interval_hours", 20).AsDouble();
+            var enabled = ScheduledChecksEnabled;
+            var interval = CheckIntervalHours;
             _localUpdates = UpdateService.CheckLocal(targets, LocalIndex);
             // Scheduled checks are off: nothing is fetched or logged, but the known updates stay what callers see.
             if (!force && !enabled) return new(PendingUpdates, [], LastUpdateCheck ?? DateTimeOffset.UtcNow);
@@ -109,10 +142,9 @@ internal sealed partial class EGlobal
             await OnEditorThread(() => _ePluginContext?.Logger.Warn($"Update check failed: {ex.Message}"), ct).ConfigureAwait(false);
             return new([], [new("ePlugin", ex.Message)], DateTimeOffset.UtcNow);
         }
-        finally { _checkingUpdates = false; }
     }
 
-    /// <summary>The versions of an enabled plugin in the local plugin directories, newest first. Never touches the disk.</summary>
+    /// <summary>The versions of an enabled plugin in the local directories, newest first. Never touches the disk.</summary>
     internal IReadOnlyList<UpdateCandidate> ListLocalVersions(PluginUpdateTarget target) =>
         LocalDirectorySource.Versions(LocalIndex, target);
 
@@ -149,6 +181,9 @@ internal sealed partial class EGlobal
     /// <summary>Runs <paramref name="action"/> on the editor thread in a later frame. Callable from any thread.</summary>
     internal static void Post(Action action) => Posted.Enqueue(action);
 
+    /// <summary>Drops the work posted so far, as an assembly reload does.</summary>
+    internal static void DiscardPosted() => Posted.Clear();
+
     /// <summary>Runs the work posted so far; called once per frame on the editor thread.</summary>
     internal static void RunPosted()
     {
@@ -174,10 +209,79 @@ internal sealed partial class EGlobal
         foreach (var update in result.Updates)
         {
             _ePluginContext?.Logger.Log($"  {update.Slug} {update.InstalledVersion} -> {update.NewVersion}  {update.ReleaseUrl ?? update.Origin}");
-            if (_updateCache?.State.FailedUpdates.GetValueOrDefault(update.Slug)?.Any(f => f.Version == update.NewVersion) == true)
+            if (_updateCache?.State.LastFailure(update) is not null)
                 _ePluginContext?.Logger.Warn($"  {update.Slug} {update.NewVersion} failed previously; repair the cause before retrying.");
         }
         _ePluginContext?.Logger.Log("Open the ePlugin Manager (Project > Tools > ePlugin Manager... or the ePlugin toolbar button) to install them.");
+    }
+}
+
+/// <summary>
+/// Runs one update check at a time. A scheduled check started while one runs returns the known updates at once. A manual
+/// check waits for the running one: it returns that check's result when it was manual too, and otherwise checks itself
+/// afterwards, as only a manual check indexes the local directories again and always asks the update sites.
+/// </summary>
+internal sealed class UpdateCheckGate
+{
+    private readonly object _gate = new();
+    private Task<UpdateCheckResult>? _running;
+    private bool _runningForced;
+
+    /// <param name="force">A manual check.</param>
+    /// <param name="check">Runs the check; called for one check at a time.</param>
+    /// <param name="known">The updates known now, for a scheduled check that is not run.</param>
+    public async Task<UpdateCheckResult> RunAsync(bool force, Func<bool, Task<UpdateCheckResult>> check, Func<UpdateCheckResult> known)
+    {
+        while (true)
+        {
+            var mine = new TaskCompletionSource<UpdateCheckResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+            Task<UpdateCheckResult>? running;
+            bool runningForced;
+            // The running check may end on a thread-pool thread while a waiting one is on the editor thread.
+            lock (_gate)
+            {
+                running = _running;
+                runningForced = _runningForced;
+                if (running is null)
+                {
+                    _running = mine.Task;
+                    _runningForced = force;
+                }
+            }
+
+            if (running is not null)
+            {
+                if (!force) return known();
+                // Back on the caller's context (the editor thread's), since the check run next calls into Godot.
+                var result = await running;
+                if (runningForced) return result;
+                continue;
+            }
+
+            try
+            {
+                var result = await check(force).ConfigureAwait(false);
+                End(mine.Task);
+                mine.SetResult(result);
+                return result;
+            }
+            catch (Exception ex)
+            {
+                // A waiting manual check reports the failure too, rather than throwing it a second time.
+                End(mine.Task);
+                mine.SetResult(new([], [new("ePlugin", ex.Message)], DateTimeOffset.UtcNow));
+                throw;
+            }
+        }
+    }
+
+    // Ended before its waiters continue, so a waiter that checks itself afterwards finds no check running.
+    private void End(Task<UpdateCheckResult> check)
+    {
+        lock (_gate)
+        {
+            if (_running == check) _running = null;
+        }
     }
 }
 #endif

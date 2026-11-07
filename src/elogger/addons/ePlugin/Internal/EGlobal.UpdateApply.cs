@@ -6,6 +6,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Enaweg.Plugin.Internal.Dotnet;
+using Enaweg.Plugin.Internal.Kinds;
 using Enaweg.Plugin.Internal.Update;
 using Godot;
 
@@ -28,12 +29,19 @@ internal sealed partial class EGlobal
     private bool _scanDeferred;
     // Plugins rolled back since this assembly was loaded: it still holds their new code until the editor restarts.
     private readonly HashSet<string> _rolledBackUpdates = new(StringComparer.Ordinal);
-    private static string UpdateProjectRoot => ProjectSettings.GlobalizePath("res://");
-    private void InitializeUpdateJournals() => _updateJournals = new(Path.Combine(UpdateProjectRoot, ".godot/eplugin/updates"), message => _ePluginContext?.Logger.Error(message));
+    private IUpdateHost? _updateHost;
+    private string UpdateProjectRoot => _host.ProjectRoot;
+    /// <summary>What update transactions need from the editor; tests set a fake before the first transaction.</summary>
+    internal IUpdateHost UpdateHost
+    {
+        get => _updateHost ??= new GodotUpdateHost(this);
+        set => _updateHost = value;
+    }
+    internal void InitializeUpdateJournals() => _updateJournals = new(Path.Combine(UpdateProjectRoot, ".godot/eplugin/updates"), message => _ePluginContext?.Logger.Error(message));
     private UpdateApplier Applier()
     {
         if (_stateStore is null || _updateCache is null) throw new InvalidOperationException("Update system is not initialized.");
-        return _updateApplier ??= new(UpdateProjectRoot, _stateStore, new GodotUpdateHost(this), _updateCache);
+        return _updateApplier ??= new(UpdateProjectRoot, _stateStore, UpdateHost, _updateCache);
     }
 
     /// <summary>
@@ -48,6 +56,8 @@ internal sealed partial class EGlobal
         var directory = _updateJournals.NewDirectory();
         try
         {
+            // Validating a GDExtension needs the editor's version, which only the editor thread may ask Godot for.
+            _ = GDExtensionConfig.EditorVersion;
             var result = await Task.Run(() => new PackageFetcher(new(), new GitRunner()).FetchAsync(candidates, targets, directory, progress, ct, allowDowngrade, allowReinstall), ct);
             foreach (var refused in result.Refused) _ePluginContext?.Logger.Warn($"Skipping the update of {refused.Candidate.Slug} {refused.Candidate.NewVersion}: {refused.Reason}");
             return (result.Packages, result.Refused, directory);
@@ -65,20 +75,22 @@ internal sealed partial class EGlobal
     internal async Task<IReadOnlyList<UpdateGroupResult>> ApplyUpdatesAsync(IReadOnlyList<ValidatedPackage> packages, string directory, bool trustChangedSources,
         bool askOnBuildFailure = false)
     {
+        RefuseBlockedApply();
         RefreshPlainPlugins();
         var ct = _ePluginContext!.UpdateLifetime;
         // Restored when this method returns, before the deferred editor restart saves the editor settings.
-        using var unfocusedScans = UnfocusedScanSuspension.Begin();
+        using var unfocusedScans = _host.SuspendUnfocusedImports();
         // Opened before waiting for the filesystem scan, so the window covers the whole installation.
         using var progress = ActivationProgress.Begin("Updating plugins...");
-        var filesystem = EditorInterface.Singleton.GetResourceFilesystem();
         var deadline = DateTimeOffset.UtcNow.AddSeconds(10);
-        while (filesystem.IsScanning())
+        while (_host.IsScanningFilesystem)
         {
             ct.ThrowIfCancellationRequested();
             if (DateTimeOffset.UtcNow >= deadline) throw new TimeoutException("Editor filesystem scan did not finish. Wait until the editor is idle and try again.");
             await _ePluginContext.ToSignal(_ePluginContext.GetTree().CreateTimer(0.1), SceneTreeTimer.SignalName.Timeout);
         }
+        // The editor processed frames while it waited; from here on the groups run without any.
+        RefuseBlockedApply();
         var groups = UpdateGroupsOf(packages);
         using var restarts = DeferRestarts();
         // The editor drops a scan requested while one runs, so a scan per group would miss later groups: scan once after all.
@@ -95,10 +107,34 @@ internal sealed partial class EGlobal
             }, askOnBuildFailure);
     }
 
+    /// <summary>
+    /// Why a staged batch cannot be installed now, as a sentence for the status line; null when it can. Downloading and
+    /// the reviews before an installation can take minutes, so this is asked again right before it changes anything: a
+    /// build of this assembly (e.g. by an IDE) waits for its reload, which would interrupt the installation on the old
+    /// code; a restart for an earlier update is due; or plugins are being enabled or disabled.
+    /// </summary>
+    internal string? UpdateApplyBlocker
+    {
+        get
+        {
+            if (_host.IsAssemblyReloadPending)
+                return "A C# build finished while the update was prepared. Install it again once the editor has loaded the rebuilt code.";
+            if (IsRestartPending) return "The editor restarts to finish an earlier update. Install the update again after the restart.";
+            if (IsChangingPlugins) return "Plugins are being enabled or disabled. Install the update again once they are done.";
+            return null;
+        }
+    }
+
+    /// <summary>Throws before the update's marker, journal or any addon file is written when it cannot be installed now.</summary>
+    private void RefuseBlockedApply()
+    {
+        if (UpdateApplyBlocker is { } reason) throw new InvalidOperationException(reason + " Addon files were not changed.");
+    }
+
     /// <summary>What a build failure does to an update of this plugin started from its details: ask, keep or rollback.</summary>
     internal string DetailsBuildFailurePolicy(string slug)
     {
-        var host = new GodotUpdateHost(this);
+        var host = UpdateHost;
         return UpdateFailureDecision.Choose(slug == "ePlugin", UpdateFailureDecision.Policy(host.BuildFailurePolicy, false, true), host.UiAvailable);
     }
 
@@ -132,7 +168,7 @@ internal sealed partial class EGlobal
             var scan = _scanDeferred && !_restartDeferred && !IsRestartPending;
             _scanDeferred = false;
             // A restart scans everything anyway.
-            if (scan) EditorInterface.Singleton.GetResourceFilesystem().Scan();
+            if (scan) _host.ScanFilesystem();
         });
     }
 
@@ -144,7 +180,7 @@ internal sealed partial class EGlobal
         ActivationProgress.PrepareForRestart();
         try { RestartRequested?.Invoke(); }
         catch (Exception ex) { _ePluginContext?.Logger.Log("Cannot prepare the editor restart: " + ex.Message); }
-        EditorInterface.Singleton.CallDeferred(EditorInterface.MethodName.RestartEditor, true);
+        _host.RestartEditor();
     }
 
     private sealed class Deferral(Action release) : IDisposable
@@ -171,7 +207,10 @@ internal sealed partial class EGlobal
         if (result == UpdateOutcome.RolledBack)
         {
             try { _rolledBackUpdates.UnionWith(UpdateJournal.Load(directory).Plugins.Select(p => p.Slug)); }
-            catch (Exception ex) when (ex is IOException or InvalidDataException or System.Text.Json.JsonException) { }
+            catch (Exception ex) when (ex is IOException or InvalidDataException or System.Text.Json.JsonException)
+            {
+                _ePluginContext?.Logger?.Warn($"Cannot read which plugins the rolled back update {directory} held: {ex.Message}");
+            }
         }
         if (result is UpdateOutcome.Completed or UpdateOutcome.RolledBack) RefreshPendingUpdates();
     }
@@ -181,97 +220,143 @@ internal sealed partial class EGlobal
         var result = keep ? Applier().Keep(journal) : Applier().Rollback(journal, "User requested rollback.");
         HandleUpdateOutcome(journal.Directory, result);
     }
-    private void ResumeUpdates()
+    /// <summary>Finishes or rolls back the update transactions an editor restart interrupted; called once at startup.</summary>
+    internal void ResumeUpdates()
     {
         if (_updateJournals is null || _stateStore is null) return;
         // Cache is needed by recovery before the first scheduled check.
-        _updateCache ??= new UpdateStateStore(Path.Combine(UpdateProjectRoot, ".godot/eplugin/update-state.json"));
+        _updateCache ??= new UpdateStateStore(Path.Combine(UpdateProjectRoot, ".godot/eplugin/update-state.json"), m => _ePluginContext?.Logger?.Warn(m));
         _updateCache.Load();
-        // Groups of one batch restart the editor once, after the last of them.
+        // A batch is staged within minutes, so a folder this old without a journal is no longer in use.
+        foreach (var folder in _updateJournals.AbandonedStaging(DateTime.UtcNow - TimeSpan.FromHours(6)))
+        {
+            try { AddonFiles.DeleteTree(folder); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                _ePluginContext?.Logger.Warn($"Cannot delete the abandoned update download {folder} yet; it is tried again at the next start: {ex.Message}");
+            }
+        }
+        // Without the state files the markers cannot be read, so every journal would look as if its marker was lost and
+        // be rolled back, also an update that built fine.
+        if (_stateStore.IsReadOnly)
+        {
+            if (_updateJournals.Read().Any())
+                _ePluginContext?.Logger.Warn("Interrupted updates are resumed once the plugin state files can be read again.");
+            return;
+        }
+        // Groups of one batch restart the editor once, after the last of them, and scan once: the editor drops a scan
+        // requested while one runs.
         using var restarts = DeferRestarts();
+        using var scans = DeferScans();
         foreach (var listed in _updateJournals.Read())
         {
-            // An earlier group's commit or rollback may have refreshed this journal's backups since it was listed.
-            UpdateJournal journal;
-            try { journal = UpdateJournal.Load(listed.Directory); }
-            catch (Exception ex) when (ex is IOException or InvalidDataException or System.Text.Json.JsonException)
+            // Runs inside Initialize: one journal that cannot be resumed must not keep the framework from starting.
+            try { ResumeUpdate(listed); }
+            catch (Exception ex)
             {
-                _ePluginContext?.Logger.Error($"Cannot read update journal {listed.Directory}: {ex.Message}");
-                continue;
+                _ePluginContext?.Logger.Error($"Cannot resume update {listed.Directory}; it is tried again at the next start: {ex.Message}");
             }
-            if (_stateStore.LastCompletedAttemptId == journal.AttemptId)
-            {
-                Directory.Delete(journal.Directory, true);
-                continue;
-            }
-            var attempts = _stateStore.LocalAttempts.Where(a => a.AttemptId == journal.AttemptId).ToArray();
-            if (attempts.Any(a => a.Reason.StartsWith("update_", StringComparison.Ordinal)))
-            {
-                _ePluginContext?.Logger.Warn($"Update needs manual recovery: {journal.Directory}. Use Retry failed in the ePlugin Manager.");
-                continue;
-            }
-            UpdateOutcome result;
-            switch (journal.State)
-            {
-                case UpdatePhase.Staged:
-                    if (attempts.Length > 0 && !_stateStore.TryAbandonAttempt(journal.AttemptId)) continue;
-                    Directory.Delete(journal.Directory, true);
-                    continue;
-                case UpdatePhase.Verified:
-                    if (attempts.Length == 0) { _ePluginContext?.Logger.Error($"Update marker is missing: {journal.Directory}; repair manually."); continue; }
-                    result = Applier().Commit(journal);
-                    break;
-                case UpdatePhase.InterimBuilt:
-                case UpdatePhase.Reconciling:
-                case UpdatePhase.Reconciled:
-                    result = attempts.Length == 0 ? Applier().Rollback(journal, "Update marker was lost.") : Applier().Resume(journal);
-                    break;
-                case UpdatePhase.AwaitingDecision:
-                    result = new GodotUpdateHost(this).UiAvailable ? UpdateOutcome.AwaitingDecision : Applier().Rollback(journal, "Cannot show the build-failure dialog.");
-                    break;
-                case UpdatePhase.Swapped:
-                case UpdatePhase.RollingBack:
-                    result = Applier().Rollback(journal, "Interrupted update.");
-                    break;
-                default:
-                    // Retain diagnostic journals and kept-version backups for at least seven days.
-                    if (DateTimeOffset.UtcNow - journal.CreatedUtc > TimeSpan.FromDays(7) && attempts.Length == 0) Directory.Delete(journal.Directory, true);
-                    continue;
-            }
-            HandleUpdateOutcome(journal.Directory, result);
         }
     }
+
+    private void ResumeUpdate(UpdateJournal listed)
+    {
+        // An earlier group's commit or rollback may have refreshed this journal's backups since it was listed.
+        var journal = UpdateJournal.Load(listed.Directory);
+        if (_stateStore!.LastCompletedAttemptId == journal.AttemptId)
+        {
+            // Acknowledged, but the editor stopped before the rest of its commit (the other groups' backups among it)
+            // was done: finished now, never rolled back.
+            if (journal.State == UpdatePhase.Verified) HandleUpdateOutcome(journal.Directory, Applier().FinishCommit(journal));
+            else DeleteJournal(journal);
+            return;
+        }
+        var attempts = _stateStore.LocalAttempts.Where(a => a.AttemptId == journal.AttemptId).ToArray();
+        if (attempts.Any(a => a.Reason.StartsWith("update_", StringComparison.Ordinal)))
+        {
+            _ePluginContext?.Logger.Warn($"Update needs manual recovery: {journal.Directory}. Use Retry under Needs attention in the ePlugin Manager.");
+            return;
+        }
+        UpdateOutcome result;
+        switch (journal.State)
+        {
+            case UpdatePhase.Staged:
+                if (attempts.Length > 0 && !_stateStore.TryAbandonAttempt(journal.AttemptId)) return;
+                DeleteJournal(journal);
+                return;
+            case UpdatePhase.Verified:
+                if (attempts.Length == 0)
+                {
+                    // the acknowledgement removed the marker, but the journal was not saved as committed
+                    if (Applier().IsAcknowledged(journal)) { result = Applier().FinishCommit(journal); break; }
+                    _ePluginContext?.Logger.Error($"Update marker is missing: {journal.Directory}; repair manually.");
+                    return;
+                }
+                result = Applier().Commit(journal);
+                break;
+            case UpdatePhase.InterimBuilt:
+            case UpdatePhase.Reconciling:
+            case UpdatePhase.Reconciled:
+                result = attempts.Length == 0 ? Applier().Rollback(journal, "Update marker was lost.") : Applier().Resume(journal);
+                break;
+            case UpdatePhase.AwaitingDecision:
+                result = UpdateHost.UiAvailable ? UpdateOutcome.AwaitingDecision : Applier().Rollback(journal, "Cannot show the build-failure dialog.");
+                break;
+            case UpdatePhase.Swapped:
+            case UpdatePhase.RollingBack:
+                result = Applier().Rollback(journal, "Interrupted update.");
+                break;
+            default:
+                // Retain diagnostic journals and kept-version backups for at least seven days.
+                if (DateTimeOffset.UtcNow - journal.CreatedUtc > TimeSpan.FromDays(7) && attempts.Length == 0) DeleteJournal(journal);
+                return;
+        }
+        HandleUpdateOutcome(journal.Directory, result);
+    }
+
+    /// <summary>Deletes a finished journal's folder; one that cannot be deleted yet is tried again at the next start.</summary>
+    private void DeleteJournal(UpdateJournal journal)
+    {
+        try { AddonFiles.DeleteTree(journal.Directory); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _ePluginContext?.Logger.Warn($"Cannot delete update journal {journal.Directory} yet; it is tried again at the next start: {ex.Message}");
+        }
+    }
+    /// <summary>The update of <paramref name="slug"/> kept with build errors, if there is one; see <see cref="RollbackKeptUpdate"/>.</summary>
+    internal UpdateJournal? KeptUpdate(string slug)
+    {
+        if (_stateStore is null || _updateJournals is null) return null;
+        var attempts = _stateStore.LocalAttempts.Where(a => a.Reason == "update_kept_build_failed").Select(a => a.AttemptId).ToHashSet();
+        return _updateJournals.Read().LastOrDefault(j => j.State == UpdatePhase.CommittedWithErrors && attempts.Contains(j.AttemptId) && j.Plugins.Any(p => p.Slug == slug));
+    }
+
+    /// <summary>The journal of the update whose failed attempt blocks <paramref name="slug"/>, if there is one.</summary>
+    internal UpdateJournal? FailedUpdateJournal(string slug)
+    {
+        if (_stateStore?.GetLocal(slug) is not { } attempt || _updateJournals is null) return null;
+        return _updateJournals.Read().LastOrDefault(j => j.AttemptId == attempt.AttemptId);
+    }
+
+    /// <summary>Restores the versions an update kept with build errors replaced; asked for in the ePlugin Manager.</summary>
+    internal void RollbackKeptUpdate(UpdateJournal journal)
+    {
+        using var progress = ActivationProgress.Begin("Restoring plugins...");
+        UpdateOutcome result;
+        try { result = Applier().RollbackKept(journal); }
+        catch (Exception ex) when (ex is InvalidOperationException or IOException)
+        {
+            _ePluginContext?.Logger.Error($"Cannot roll back the kept update: {ex.Message}");
+            return;
+        }
+        HandleUpdateOutcome(journal.Directory, result);
+    }
+
     private void RetryUpdate(UpdateJournal? journal)
     {
         if (journal is null) { _ePluginContext?.Logger.Error("Update journal is missing; restore addon files and project references manually before clearing local state."); return; }
         using var progress = ActivationProgress.Begin("Recovering plugin update...");
         HandleUpdateOutcome(journal.Directory, Applier().Retry(journal));
-    }
-
-    /// <summary>
-    /// Turns off "Import Resources When Unfocused" while an update waits for and swaps addon files. While the editor is
-    /// unfocused, that setting rescans every half second; a project whose rescan takes longer never becomes idle.
-    /// </summary>
-    private sealed class UnfocusedScanSuspension : IDisposable
-    {
-        // Recent Godot versions keep the setting under behavior/; older ones do not.
-        private static readonly string[] Keys = ["interface/editor/behavior/import_resources_when_unfocused", "interface/editor/import_resources_when_unfocused"];
-        private readonly string[] _suspended;
-        private UnfocusedScanSuspension(string[] suspended) => _suspended = suspended;
-
-        public static UnfocusedScanSuspension Begin()
-        {
-            var settings = EditorInterface.Singleton.GetEditorSettings();
-            var suspended = Keys.Where(key => settings.HasSetting(key) && settings.GetSetting(key).AsBool()).ToArray();
-            foreach (var key in suspended) settings.SetSetting(key, false);
-            return new(suspended);
-        }
-
-        public void Dispose()
-        {
-            var settings = EditorInterface.Singleton.GetEditorSettings();
-            foreach (var key in _suspended) settings.SetSetting(key, true);
-        }
     }
 
     private sealed class GodotUpdateHost(EGlobal global) : IUpdateHost
@@ -283,7 +368,8 @@ internal sealed partial class EGlobal
         public bool UiAvailable => global.LicenseUiAvailable;
         public string BuildFailurePolicy => ProjectSettings.GetSetting("eplugin/updates/on_build_failure", "ask").AsString();
         public bool RestartAlways => ProjectSettings.GetSetting("eplugin/updates/restart_policy", "auto").AsString() == "always";
-        public bool IsEnabled(string slug) => global._host.IsPluginEnabled(slug);
+        // A GDExtension add-on is never enabled, but Godot always runs it.
+        public bool IsEnabled(string slug) => global._host.IsPluginEnabled(slug) || global.IsExtensionAddon(slug);
         public bool IsManaged(string slug) => global.IsManagedPlugin(slug);
         public void Preflight(IReadOnlyList<ValidatedPackage> packages)
         {
@@ -294,7 +380,7 @@ internal sealed partial class EGlobal
             foreach (var package in packages.Where(p => IsManaged(p.Candidate.Slug)))
                 if (global._contexts.FirstOrDefault(c => c.Slug == package.Candidate.Slug)?.State != EEditorPluginState.Activated)
                     throw new InvalidOperationException($"Finish enabling {package.Candidate.Slug} before updating it.");
-            var findings = global.UpdatePreflightFindings(packages.Select(p => p.Candidate with { NewVersion = PluginIni.Parse(File.ReadAllText(Path.Combine(p.StagingDir, "plugin.cfg")))["version"] }).ToArray());
+            var findings = global.UpdatePreflightFindings(packages.Select(p => p.Candidate with { NewVersion = UpdateApplier.PackageVersion(p) }).ToArray());
             if (findings.Any(f => f.Severity == FindingSeverity.Error)) throw new InvalidOperationException(string.Join("; ", findings.Where(f => f.Severity == FindingSeverity.Error).Select(f => f.Message)));
             foreach (var warning in findings.Where(f => f.Severity == FindingSeverity.Warning)) Log(warning.Message);
             if (global._toCheckEnable.Count > 0 || global._toCheckDisable.Count > 0) throw new InvalidOperationException("Finish plugin transitions before updating.");
@@ -305,7 +391,7 @@ internal sealed partial class EGlobal
         public void Bridge(UpdateJournal journal, UpdatePluginJournal plugin)
         {
             if (!plugin.IsEPlugin || !journal.Recipes.TryGetValue(plugin.Slug, out var recipe)) return;
-            plugin.Preserved = InterimBridge.Restore(plugin.Slug, recipe.Old, journal.Backup(plugin.Slug), Path.Combine(UpdateProjectRoot, "addons", plugin.Slug));
+            plugin.Preserved = InterimBridge.Restore(plugin.Slug, recipe.Old, journal.Backup(plugin.Slug), Path.Combine(global.UpdateProjectRoot, "addons", plugin.Slug));
             journal.Save();
         }
         public void Reconcile(UpdateJournal journal, bool rollback) => global.ReconcileUpdateRecipes(journal, rollback);
@@ -335,12 +421,19 @@ internal sealed partial class EGlobal
         public void Scan()
         {
             if (global._deferScans) { global._scanDeferred = true; return; }
-            EditorInterface.Singleton.GetResourceFilesystem().Scan();
+            global._host.ScanFilesystem();
         }
         public BuildOutcome Build()
         {
             ActivationProgress.SetText("Building updated project...");
             return (global.GetOrCreateContext(global._ePluginContext!).Cli as ICheckedDotnetCli)?.TryBuild() ?? new(1, ["Checked dotnet CLI is unavailable."]);
+        }
+        public bool KeepOnProjectErrors => ProjectSettings.GetSetting("eplugin/updates/keep_on_project_errors", true).AsBool();
+        public IReadOnlyList<string> PluginCodeRoots(UpdateJournal journal) => PluginCode.Roots(global.UpdateProjectRoot, journal);
+        public BuildOutcome BuildPluginsOnly(PluginsOnlyBuild build)
+        {
+            ActivationProgress.SetText("Building the plugins without the project's code...");
+            return (global.GetOrCreateContext(global._ePluginContext!).Cli as ICheckedDotnetCli)?.TryBuildPluginsOnly(build) ?? new(1, ["Checked dotnet CLI is unavailable."]);
         }
         public void RequestReload(UpdateJournal journal)
         {
@@ -350,10 +443,20 @@ internal sealed partial class EGlobal
             if (global._restartDeferrals > 0) { global._restartDeferred = true; return; }
             global.RestartForUpdate();
         }
+        public bool ReloadExtension(string resourcePath)
+        {
+            var status = GDExtensionManager.IsExtensionLoaded(resourcePath)
+                ? GDExtensionManager.ReloadExtension(resourcePath) : GDExtensionManager.LoadExtension(resourcePath);
+            if (status != GDExtensionManager.LoadStatus.Ok) Log($"Godot could not reload {resourcePath}: {status}.");
+            return status == GDExtensionManager.LoadStatus.Ok;
+        }
         public bool Verify(UpdatePluginJournal plugin)
         {
-            var metadata = EditorPluginExtensions.ReadMetadata($"res://addons/{plugin.Slug}/plugin.cfg");
-            return (plugin.Slug != "ePlugin" || global.IsValid()) && IsEnabled(plugin.Slug) && metadata?.Version == plugin.NewVersion &&
+            // An add-on has no version in its files; what is there to check is that it is still a GDExtension or became a plugin.
+            if (PluginKinds.Workflow(plugin) is GDExtensionAddonWorkflow)
+                return global.IsExtensionAddon(plugin.Slug) || File.Exists(Path.Combine(ProjectSettings.GlobalizePath(global._host.PluginDirectory(plugin.Slug)), "plugin.cfg"));
+            var metadata = EditorPluginExtensions.ReadMetadata($"{global._host.PluginDirectory(plugin.Slug)}/plugin.cfg");
+            return (plugin.Slug != "ePlugin" || global.IsValid()) && IsEnabled(plugin.Slug) && SemVer.Same(metadata?.Version, plugin.NewVersion) &&
                 global._contexts.FirstOrDefault(c => c.Slug == plugin.Slug)?.State != EEditorPluginState.Error;
         }
         public void Log(string message) => global._ePluginContext?.Logger.Log(message);

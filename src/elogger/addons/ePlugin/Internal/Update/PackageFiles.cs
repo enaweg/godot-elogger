@@ -16,7 +16,8 @@ internal static class PluginIni
     {
         var values = new Dictionary<string, string>(StringComparer.Ordinal);
         var section = "";
-        var position = 0;
+        // A UTF-8 byte order mark, which a file read from a raw URL keeps and Trim does not remove.
+        var position = text.StartsWith('\uFEFF') ? 1 : 0;
         while (position < text.Length)
         {
             var start = position;
@@ -92,7 +93,8 @@ internal static class PluginIni
 internal static class PackageFiles
 {
     public const int MaximumFiles = 20000;
-    public const long MaximumTotal = 512L * 1024 * 1024;
+    // GDExtensions ship a library per platform; one of over 100 MiB each already extracts to more than 512 MiB.
+    public const long MaximumTotal = 1024L * 1024 * 1024;
     public const long MaximumFile = 256L * 1024 * 1024;
     /// <summary>How the local file system compares paths: case-insensitively on Windows only.</summary>
     public static readonly StringComparison PathComparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
@@ -108,7 +110,15 @@ internal static class PackageFiles
             throw new InvalidDataException("Unsafe package path: " + path);
         return string.Join('/', parts);
     }
-    public static bool Skip(string path) => path.Split('/').Any(p => (p.StartsWith(".git", StringComparison.OrdinalIgnoreCase) && !p.Equals(".gitmodules", StringComparison.OrdinalIgnoreCase)) || p is "__MACOSX" or ".DS_Store" or "Thumbs.db");
+    public static bool Skip(string path) => path.Split('/').Any(p => (p.StartsWith(".git", StringComparison.OrdinalIgnoreCase) && !p.Equals(".gitmodules", StringComparison.OrdinalIgnoreCase)) || p is "__MACOSX" or ".DS_Store" or "Thumbs.db" || IsRuntimeCopy(p));
+
+    /// <summary>
+    /// A copy of a GDExtension library (and its debug symbols) that the editor on Windows loads instead of the original,
+    /// named like it with a leading '~' and kept in the same folder. It is never part of a plugin: packages and installed
+    /// folders leave it out, and updates neither back it up nor delete it.
+    /// </summary>
+    public static bool IsRuntimeCopy(string name) =>
+        name.StartsWith('~') && System.IO.Path.GetExtension(name).ToLowerInvariant() is ".dll" or ".pdb" or ".so" or ".dylib";
     public static string Inside(string root, string relative)
     {
         var prefix = System.IO.Path.GetFullPath(root).TrimEnd(System.IO.Path.DirectorySeparatorChar) + System.IO.Path.DirectorySeparatorChar;

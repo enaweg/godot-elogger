@@ -59,7 +59,11 @@ internal static class ActivationProgress
 
     /// <summary>Connects to or starts a helper, or returns null when none can run. Tests replace it with a fake.</summary>
     internal static Func<IProgressHelper?> Launch { get; set; } = LaunchDefault;
-    internal static Func<(IProgressHelper Helper, string User)?> Resume { get; set; } = ResumeDefault;
+    /// <summary>
+    /// The user a restart handed over, and its helper; without one when its window was closed in a helper of another
+    /// protocol, which a self-update leaves behind.
+    /// </summary>
+    internal static Func<(IProgressHelper? Helper, string User)?> Resume { get; set; } = ResumeDefault;
     internal static Func<IDisposable?> HideSettingsDialog { get; set; } = ProjectSettingsDialog.TryHide;
     internal static Func<bool> IsEditorThread { get; set; } = () => OS.GetThreadCallerId() == OS.GetMainThreadId();
 
@@ -69,7 +73,7 @@ internal static class ActivationProgress
 
     internal static IProgressHelper? LaunchDefault() => ProcessProgressHelper.TryStart(HelperPath);
 
-    internal static (IProgressHelper Helper, string User)? ResumeDefault() =>
+    internal static (IProgressHelper? Helper, string User)? ResumeDefault() =>
         ProcessProgressHelper.SharedDirectory() is { } directory &&
         ProgressSession.TryResume(ProjectSettings.GlobalizePath(HandoffPath), directory) is (var session, var user)
             ? (session, user)
@@ -101,12 +105,14 @@ internal static class ActivationProgress
         {
             _restartPending = false;
             if (_helper is not null || Users.Count > 0) return false;
-            (IProgressHelper Helper, string User)? resumed;
+            (IProgressHelper? Helper, string User)? resumed;
             try { resumed = Resume(); }
             catch (Exception) { resumed = null; }
             if (resumed is not (var helper, var user)) return false;
-            _helper = helper;
             _resumed = new User(user);
+            // The next Begin starts a helper of this protocol for it.
+            if (helper is null) return true;
+            _helper = helper;
             // Ends the hold: from now on the window closes when this user stops sending.
             Send(_resumed, "HEARTBEAT");
             if (_helper is not null) return true;
@@ -205,11 +211,13 @@ internal static class ActivationProgress
     private static void HideSettingsOnce()
     {
         if (_settingsDialogRequested) return;
-        _settingsDialogRequested = true;
         try
         {
-            // Project Settings is editor UI; an operation started on another thread leaves it alone.
-            if (IsEditorThread()) _settingsDialog = HideSettingsDialog();
+            // Project Settings is editor UI; an operation started on another thread leaves it alone, and a later one on
+            // the editor thread in the same lifetime still hides it.
+            if (!IsEditorThread()) return;
+            _settingsDialogRequested = true;
+            _settingsDialog = HideSettingsDialog();
         }
         catch (Exception)
         {
@@ -264,11 +272,15 @@ internal static class ActivationProgress
         _mayStart = false;
         try { _helper = Launch(); }
         catch (Exception) { _helper = null; }
+        // Another thread only connects to a running helper: starting one is still left to the editor thread.
+        if (_helper is null && !IsEditorThread()) _mayStart = true;
         try
         {
             foreach (var user in Users)
             {
-                if (!user.Held && !user.Ended && user.Text is { } text) _helper?.Send(user.Id, Encode(text));
+                if (user.Held || user.Ended || user.Text is not { } text) continue;
+                try { _helper?.Send(user.Id, Encode(text)); }
+                catch (ProgressHelperBusyException) { /* the user's next text or heartbeat follows */ }
             }
         }
         catch (Exception)
@@ -278,11 +290,12 @@ internal static class ActivationProgress
         }
     }
 
-    private static void Text(User? user, string text)
+    private static void Text(User? user, string? text)
     {
         if (user is null || user.Ended) return;
-        user.Text = text;
-        Send(user, Encode(text));
+        // A plugin compiled without nullable checks may pass null; failing would leak the user that Begin registered.
+        user.Text = text ?? "";
+        Send(user, Encode(user.Text));
     }
 
     private static string Encode(string text) => "TEXT " + Convert.ToBase64String(Encoding.UTF8.GetBytes(text));
@@ -296,12 +309,16 @@ internal static class ActivationProgress
             Connect();
             if (_helper is null)
             {
-                if (!_mayStart) return;
+                if (!_mayStart || !IsEditorThread()) return;
                 continue;
             }
             try
             {
                 _helper.Send(user.Id, command);
+                return;
+            }
+            catch (ProgressHelperBusyException)
+            {
                 return;
             }
             catch (Exception)
@@ -331,13 +348,25 @@ internal static class ActivationProgress
         }
     }
 
+    /// <summary>
+    /// Ends the user in the connected helper only. A helper started or connected just for this would never show the
+    /// window, only replay text and then idle until its lifetime ends; a helper without the user closes its window anyway.
+    /// </summary>
+    private static void SendEnd(User user)
+    {
+        if (user.Held || _helper is null) return;
+        try { _helper.Send(user.Id, "END"); }
+        catch (ProgressHelperBusyException) { /* the helper closes the window after its timeout */ }
+        catch (Exception) { Lost(); }
+    }
+
     private static void End(User user, User? previous)
     {
         if (Current.Value == user) Current.Value = previous;
         lock (Gate)
         {
             if (--user.Depth > 0) return;
-            Send(user, "END");
+            SendEnd(user);
             user.Ended = true;
             Users.Remove(user);
             if (Users.Count == 0) Last();
@@ -398,7 +427,10 @@ internal interface IProgressHelper : IDisposable
     /// <summary>How long the helper process has been running.</summary>
     TimeSpan Age { get; }
 
-    /// <summary>Sends one protocol command of a user. Throws when the helper is unavailable or the send fails.</summary>
+    /// <summary>
+    /// Sends one protocol command of a user. Throws when the helper is unavailable or the send fails, and
+    /// <see cref="ProgressHelperBusyException"/> when another editor kept the helper busy, which drops only this command.
+    /// </summary>
     void Send(string user, string command);
 
     /// <summary>Records the user so that the editor a restart starts can continue it.</summary>

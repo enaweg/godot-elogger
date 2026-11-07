@@ -14,6 +14,8 @@ internal sealed partial class EGlobal : IUpdateWorkflowHost
 {
     bool IUpdateWorkflowHost.IsRestartPending => IsRestartPending;
 
+    string? IUpdateWorkflowHost.UpdateApplyBlocker => UpdateApplyBlocker;
+
     Task<UpdateCheckResult> IUpdateWorkflowHost.CheckForUpdatesAsync(bool force) => CheckForUpdatesAsync(force);
 
     Task<IReadOnlyList<UpdateCandidate>> IUpdateWorkflowHost.ListRemoteVersionsAsync(PluginUpdateTarget target,
@@ -26,10 +28,14 @@ internal sealed partial class EGlobal : IUpdateWorkflowHost
 
     LicenseReview? IUpdateWorkflowHost.ReviewUpdateLicenses(IEnumerable<ValidatedPackage> packages) => ReviewUpdateLicenses(packages);
 
-    void IUpdateWorkflowHost.RecordLicenses(LicenseReview review) => RecordLicenses(review);
 
     Task<IReadOnlyList<UpdateGroupResult>> IUpdateWorkflowHost.ApplyUpdatesAsync(IReadOnlyList<ValidatedPackage> packages,
         string directory, bool trustChangedSources, bool askOnBuildFailure) =>
         ApplyUpdatesAsync(packages, directory, trustChangedSources, askOnBuildFailure);
+
+    Task<(ValidatedPackage Package, string Directory)> IUpdateWorkflowHost.StageNewAddonAsync(AddonArchive archive, CancellationToken ct) =>
+        StageNewAddonAsync(archive, ct);
+
+    AddonInstallResult IUpdateWorkflowHost.InstallNewAddon(ValidatedPackage package, string directory) => InstallNewAddon(package, directory);
 }
 #endif
