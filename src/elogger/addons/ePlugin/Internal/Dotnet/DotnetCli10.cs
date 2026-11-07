@@ -5,9 +5,9 @@ using Enaweg.Plugin.Logging;
 namespace Enaweg.Plugin.Internal.Dotnet;
 
 /// <summary>The dotnet CLI from .NET 10: <c>dotnet package|reference add|remove ... --project &lt;project&gt;</c>.</summary>
-internal sealed class DotnetCli10(ILogger? logger, bool enableDebugLogging, IProcessRunner? runner = null,
-    string? projectRoot = null)
-    : DotnetCliBase(logger, enableDebugLogging, runner, projectRoot)
+internal sealed class DotnetCli10(ILogger? logger, bool enableDebugLogging, string projectRoot, string? assemblyName = null,
+    IProcessRunner? runner = null, string? solutionDirectory = null)
+    : DotnetCliBase(logger, enableDebugLogging, projectRoot, assemblyName, runner, solutionDirectory)
 {
     private const string CmdDotNet = "dotnet";
 
@@ -18,9 +18,12 @@ internal sealed class DotnetCli10(ILogger? logger, bool enableDebugLogging, IPro
 
     public override bool TryRebuildSolution() => TryBuild().ExitCode == 0;
 
-    public override BuildOutcome TryBuild()
+    public override BuildOutcome TryBuild(bool keepNewAssembly = true) => BuildKeepingOutput(["build", SolutionPath, "--no-incremental"], keepNewAssembly);
+
+    public override BuildOutcome TryBuildPluginsOnly(PluginsOnlyBuild build)
     {
-        var result = Execute(["build", SolutionPath, "--no-incremental"]);
+        build.WriteTargets(GodotProjectPath);
+        var result = Execute(build.Arguments(GodotProjectPath));
         return new BuildOutcome(result.Item1, result.Item2);
     }
 
@@ -47,9 +50,11 @@ internal sealed class DotnetCli10(ILogger? logger, bool enableDebugLogging, IPro
 
     public override bool TryAddProjectToSolution(string projectPath, string? virtualFolderName)
     {
-        return Execute(virtualFolderName is null
+        if (Execute(virtualFolderName is null
             ? ["sln", SolutionPath, "add", ProjectFile(projectPath)]
-            : ["sln", SolutionPath, "add", "-s", virtualFolderName, ProjectFile(projectPath)]).Item1 == 0;
+            : ["sln", SolutionPath, "add", "-s", virtualFolderName, ProjectFile(projectPath)]).Item1 != 0) return false;
+        MapExportRelease(projectPath, reference: false);
+        return true;
     }
 
     public override bool AddNugetToProject(string nugetName, string? version = null, string? source = null,
@@ -101,7 +106,9 @@ internal sealed class DotnetCli10(ILogger? logger, bool enableDebugLogging, IPro
 
     public override bool TryAddProjectReference(string projectReference)
     {
-        return Execute(["reference", "add", ProjectFile(projectReference), "--project", GodotProjectPath]).Item1 == 0;
+        if (Execute(["reference", "add", ProjectFile(projectReference), "--project", GodotProjectPath]).Item1 != 0) return false;
+        MapExportRelease(projectReference, reference: true);
+        return true;
     }
 
     public override void RemoveProjectReference(string projectReference)

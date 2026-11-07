@@ -51,17 +51,19 @@ internal sealed class DotnetVersionManager : ExecuteCliBase
 
         if (!IsDotnetAvailable)
         {
-            logger?.Error(
-                "The dotnet command line tool could not be executed, make sure it is installed and accessible." +
-                (_probe.Output.Length > 0 ? $" It reported: {_probe.Output}" : ""));
+            logger?.Error(DotnetFailure.DotnetMissingHint + (_probe.Output.Length > 0 ? $" It reported: {_probe.Output}" : ""));
         }
     }
 
-    public IDotnetCli Create(ILogger? logger)
+    /// <summary>
+    /// The CLI for the project in <paramref name="projectRoot"/> and its solution in <paramref name="solutionDirectory"/>,
+    /// see <see cref="DotnetCliBase"/>.
+    /// </summary>
+    public IDotnetCli Create(ILogger? logger, string projectRoot, string? assemblyName, string solutionDirectory)
     {
         return Is10OrLater
-            ? new DotnetCli10(logger, _enableDebugLogging, _runner)
-            : new DotnetCli9(logger, _enableDebugLogging, _runner);
+            ? new DotnetCli10(logger, _enableDebugLogging, projectRoot, assemblyName, _runner, solutionDirectory)
+            : new DotnetCli9(logger, _enableDebugLogging, projectRoot, assemblyName, _runner, solutionDirectory);
     }
 
     private Probe ReadDotnetVersion()

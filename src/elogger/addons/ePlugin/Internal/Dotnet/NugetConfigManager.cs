@@ -4,10 +4,10 @@ using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
-using System.Xml;
+using System.Text.RegularExpressions;
 using System.Xml.Linq;
+using Enaweg.Plugin.Internal.Update;
 using Enaweg.Plugin.Logging;
-using Godot;
 
 namespace Enaweg.Plugin.Internal.Dotnet;
 
@@ -25,27 +25,28 @@ namespace Enaweg.Plugin.Internal.Dotnet;
 /// configured by hand) is left untouched. The whole file is only ever deleted when, after removing
 /// the last managed entry, nothing else is left in it.
 /// </remarks>
-internal static class NugetConfigManager
+internal static partial class NugetConfigManager
 {
     private const string ManagedKeyPrefix = "ePlugin-";
     private const string UsedByCommentPrefix = "ePlugin-managed used-by=\"";
+    private static readonly string[] ConfigFileNames = ["nuget.config", "NuGet.config", "NuGet.Config"];
 
-    public static bool RegisterSource(string pluginSlug, string rawSource, ILogger? logger)
+    public static bool RegisterSource(string projectRoot, string pluginSlug, string rawSource, ILogger? logger)
     {
         try
         {
-            var normalized = Normalize(rawSource);
+            var normalized = Normalize(projectRoot, rawSource);
             if (normalized is null)
             {
-                logger?.Log(
-                    $"NuGet source '{rawSource}' is outside the project and cannot be tracked in nuget.config.");
+                logger?.Warn(
+                    $"NuGet source '{rawSource}' is outside the project and cannot be tracked in nuget.config; other checkouts of the project cannot restore its packages.");
                 return true;
             }
 
             var key = ComputeKey(normalized);
-            var configPath = GetConfigPath();
-            var doc = File.Exists(configPath) ? XDocument.Load(configPath) : new XDocument(new XElement("configuration"));
-            var root = doc.Root;
+            var configPath = GetConfigPath(projectRoot);
+            var file = Load(configPath);
+            var root = file.Document.Root;
             if (root is null)
             {
                 logger?.Error("nuget.config is malformed (missing root <configuration> element), skipping.");
@@ -66,24 +67,24 @@ internal static class NugetConfigManager
             else
             {
                 packageSources = new XElement("packageSources");
-                root.Add(packageSources);
+                XmlFile.AddLines(root, packageSources);
             }
 
             var existingAdd = packageSources.Elements("add").FirstOrDefault(e => (string?)e.Attribute("key") == key);
             if (existingAdd is null)
             {
-                packageSources.Add(
-                    new XComment($" {UsedByCommentPrefix}{pluginSlug}\" "),
+                XmlFile.AddLines(packageSources,
+                    new XComment(UsedByComment([pluginSlug])),
                     new XElement("add", new XAttribute("key", key), new XAttribute("value", normalized)));
             }
             else
             {
-                var usedBy = ParseUsedBy(existingAdd.PreviousNode as XComment).Append(pluginSlug)
+                var usedBy = ParseUsedBy(CommentBefore(existingAdd)).Append(pluginSlug)
                     .Distinct(StringComparer.Ordinal).ToArray();
                 SetUsedByComment(existingAdd, usedBy);
             }
 
-            Save(doc, configPath);
+            file.Write(configPath);
             return true;
         }
         catch (Exception ex)
@@ -93,24 +94,24 @@ internal static class NugetConfigManager
         }
     }
 
-    public static bool UnregisterSource(string pluginSlug, string rawSource, ILogger? logger)
+    public static bool UnregisterSource(string projectRoot, string pluginSlug, string rawSource, ILogger? logger)
     {
         try
         {
-            var normalized = Normalize(rawSource);
+            var normalized = Normalize(projectRoot, rawSource);
             if (normalized is null)
             {
                 return true;
             }
 
-            var configPath = GetConfigPath();
+            var configPath = GetConfigPath(projectRoot);
             if (!File.Exists(configPath))
             {
                 return true;
             }
 
-            var doc = XDocument.Load(configPath);
-            var root = doc.Root;
+            var file = Load(configPath);
+            var root = file.Document.Root;
             var packageSources = root?.Element("packageSources");
             var key = ComputeKey(normalized);
             var add = packageSources?.Elements("add").FirstOrDefault(e => (string?)e.Attribute("key") == key);
@@ -119,30 +120,35 @@ internal static class NugetConfigManager
                 return true;
             }
 
-            var usedBy = ParseUsedBy(add.PreviousNode as XComment).Where(s => s != pluginSlug).ToArray();
+            var usedBy = ParseUsedBy(CommentBefore(add)).Where(s => s != pluginSlug).ToArray();
             if (usedBy.Length == 0)
             {
-                (add.PreviousNode as XComment)?.Remove();
-                add.Remove();
+                if (CommentBefore(add) is { } comment)
+                {
+                    XmlFile.RemoveLine(comment);
+                }
+
+                XmlFile.RemoveLine(add);
             }
             else
             {
                 SetUsedByComment(add, usedBy);
             }
 
-            if (packageSources is { HasElements: false })
+            // only when nothing else is left, comments included, e.g. a source the team commented out
+            if (packageSources is not null && packageSources.Nodes().All(XmlFile.IsWhitespace))
             {
-                packageSources.Remove();
+                XmlFile.RemoveLine(packageSources);
             }
 
-            if (!root.Nodes().Any())
+            if (root.Nodes().All(XmlFile.IsWhitespace) && file.Document.Nodes().All(n => n == root || n is XText))
             {
                 File.Delete(configPath);
                 logger?.Log("Removed nuget.config (no managed NuGet sources remain).");
                 return true;
             }
 
-            Save(doc, configPath);
+            file.Write(configPath);
             return true;
         }
         catch (Exception ex)
@@ -152,12 +158,67 @@ internal static class NugetConfigManager
         }
     }
 
+    /// <summary>
+    /// Whether two recipe sources are tracked as the same nuget.config entry, however they are spelled
+    /// (<c>res://addons/x/feed</c> and <c>addons/x/feed/</c>).
+    /// </summary>
+    public static bool SameSource(string projectRoot, string? a, string? b)
+    {
+        if (a is null || b is null || a == b)
+        {
+            return a == b;
+        }
+
+        return Normalize(projectRoot, a) is { } first && Normalize(projectRoot, b) is { } second && ComputeKey(first) == ComputeKey(second);
+    }
+
+    private static string UsedByComment(string[] usedBy) => $" {UsedByCommentPrefix}{string.Join(",", usedBy.Select(EncodeSlug))}\" ";
+
+    /// <summary>
+    /// A slug as the used-by comment holds it: the list is separated by commas, and an XML comment cannot contain
+    /// <c>--</c> (the writer would turn it into <c>- -</c>), so those characters are percent-encoded.
+    /// </summary>
+    internal static string EncodeSlug(string slug)
+    {
+        var encoded = new StringBuilder(slug.Length);
+        for (var i = 0; i < slug.Length; i++)
+        {
+            encoded.Append(slug[i] switch
+            {
+                '%' => "%25",
+                ',' => "%2C",
+                '"' => "%22",
+                '-' when i > 0 && slug[i - 1] == '-' => "%2D",
+                var c => c.ToString(),
+            });
+        }
+
+        return encoded.ToString();
+    }
+
+    internal static string DecodeSlug(string text) =>
+        EncodedCharacter().Replace(text, match => match.Groups[1].Value switch
+        {
+            "25" => "%",
+            "2C" => ",",
+            "22" => "\"",
+            _ => "-",
+        });
+
+    // The characters EncodeSlug percent-encodes; group 1 is their code.
+    [GeneratedRegex("%(25|2C|22|2D)", RegexOptions.CultureInvariant)]
+    private static partial Regex EncodedCharacter();
+
     private static void SetUsedByComment(XElement add, string[] usedBy)
     {
-        var text = $" {UsedByCommentPrefix}{string.Join(",", usedBy)}\" ";
-        if (add.PreviousNode is XComment comment)
+        var text = UsedByComment(usedBy);
+        if (CommentBefore(add) is { } comment)
         {
             comment.Value = text;
+        }
+        else if (XmlFile.IndentBefore(add) is { } indent)
+        {
+            add.AddBeforeSelf(new XComment(text), new XText("\n" + indent));
         }
         else
         {
@@ -180,7 +241,7 @@ internal static class NugetConfigManager
         }
 
         var inner = text.Substring(UsedByCommentPrefix.Length, text.Length - UsedByCommentPrefix.Length - 1);
-        return inner.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        return inner.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(DecodeSlug).ToArray();
     }
 
     /// <summary>
@@ -189,7 +250,7 @@ internal static class NugetConfigManager
     /// (portable across machines/checkouts) for local directories. Returns <see langword="null"/>
     /// when a local source cannot be expressed relative to the project.
     /// </summary>
-    private static string? Normalize(string rawSource)
+    private static string? Normalize(string projectRoot, string rawSource)
     {
         if (string.IsNullOrWhiteSpace(rawSource))
         {
@@ -202,10 +263,19 @@ internal static class NugetConfigManager
             return rawSource;
         }
 
-        var projectRoot = Path.GetFullPath(ProjectSettings.GlobalizePath("res://"));
-        var fullSourcePath = Path.GetFullPath(ProjectSettings.GlobalizePath(rawSource));
+        // res:// is the project folder; user:// and other schemes never point into it.
+        const string projectScheme = "res://";
+        var isResource = rawSource.StartsWith(projectScheme, StringComparison.Ordinal);
+        if (!isResource && rawSource.Contains("://", StringComparison.Ordinal))
+        {
+            return null;
+        }
 
-        var relative = Path.GetRelativePath(projectRoot, fullSourcePath);
+        var root = Path.GetFullPath(projectRoot);
+        // A relative path is relative to the project, not to the editor's working directory.
+        var fullSourcePath = Path.GetFullPath(Path.Combine(root, isResource ? rawSource[projectScheme.Length..] : rawSource));
+
+        var relative = Path.GetRelativePath(root, fullSourcePath);
         if (relative.StartsWith("..", StringComparison.Ordinal) || Path.IsPathRooted(relative))
         {
             // outside the project tree; cannot be represented portably.
@@ -234,16 +304,56 @@ internal static class NugetConfigManager
         return ManagedKeyPrefix + Convert.ToHexString(hash)[..12];
     }
 
-    private static string GetConfigPath()
+    /// <summary>
+    /// The project's existing config file, else a new <c>nuget.config</c>. NuGet reads only the first of these names it
+    /// finds in a folder, in this order; on a case-sensitive file system a new <c>nuget.config</c> next to a
+    /// <c>NuGet.Config</c> would hide the project's own sources.
+    /// </summary>
+    private static string GetConfigPath(string projectRoot)
     {
-        return Path.GetFullPath(Path.Combine(ProjectSettings.GlobalizePath("res://"), "nuget.config"));
+        var onDisk = Directory.Exists(projectRoot) ? Directory.EnumerateFiles(projectRoot).Select(Path.GetFileName).OfType<string>().ToArray() : [];
+        return Path.GetFullPath(Path.Combine(projectRoot, ConfigFileName(onDisk, name => File.Exists(Path.Combine(projectRoot, name)))));
     }
 
-    private static void Save(XDocument doc, string configPath)
+    /// <summary>
+    /// The name of the config file among the files <paramref name="onDisk"/>, spelled as on disk: the file is replaced
+    /// by a rename, which on a case-insensitive file system would otherwise change the case of its name.
+    /// </summary>
+    internal static string ConfigFileName(string[] onDisk, Func<string, bool> exists)
     {
-        var settings = new XmlWriterSettings { Indent = true, Encoding = new UTF8Encoding(false) };
-        using var writer = XmlWriter.Create(configPath, settings);
-        doc.Save(writer);
+        var name = ConfigFileNames.FirstOrDefault(n => onDisk.Contains(n, StringComparer.Ordinal));
+        if (name is not null)
+        {
+            return name;
+        }
+
+        // another spelling is only the config file where the file system ignores case
+        return exists(ConfigFileNames[0])
+            ? onDisk.FirstOrDefault(n => n.Equals(ConfigFileNames[0], StringComparison.OrdinalIgnoreCase)) ?? ConfigFileNames[0]
+            : ConfigFileNames[0];
+    }
+
+    private static XmlFile Load(string configPath)
+    {
+        if (File.Exists(configPath)) return XmlFile.Read(configPath);
+        const string empty = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<configuration>\n</configuration>\n";
+        return new(XDocument.Parse(empty, LoadOptions.PreserveWhitespace), Environment.NewLine, false);
+    }
+
+    /// <summary>The comment before an entry, skipping the line break between them.</summary>
+    /// <summary>
+    /// The used-by comment ePlugin wrote before a managed entry; null when there is none, also when another comment is
+    /// there (e.g. one the team wrote after removing ePlugin's by hand), which is never changed or removed.
+    /// </summary>
+    private static XComment? CommentBefore(XElement add)
+    {
+        var node = add.PreviousNode;
+        while (node is not null && XmlFile.IsWhitespace(node))
+        {
+            node = node.PreviousNode;
+        }
+
+        return node is XComment comment && comment.Value.Trim().StartsWith(UsedByCommentPrefix, StringComparison.Ordinal) ? comment : null;
     }
 }
 #endif

@@ -11,10 +11,42 @@ internal static class EditorWindows
     private static readonly StringName WindowSetIcon = "window_set_icon";
     private static Image? _icon;
 
-    /// <summary>Scales the sizes a scene authored for 100% editor scale, and shows the ePlugin icon whenever it opens.</summary>
+    /// <summary>The editor's display scale; 1 without an editor, e.g. when tests create a dialog.</summary>
+    public static float Scale => Engine.IsEditorHint() ? EditorInterface.Singleton.GetEditorScale() : 1f;
+
+    /// <summary>The editor's theme; null without an editor.</summary>
+    // Asking for EditorInterface outside the editor logs an error, so it is not asked at all.
+    public static Theme? Theme => Engine.IsEditorHint() ? EditorInterface.Singleton.GetEditorTheme() : null;
+
+    /// <summary>Selects <paramref name="path"/> in the editor's FileSystem dock; does nothing without an editor.</summary>
+    public static void SelectFile(string path)
+    {
+        if (Engine.IsEditorHint()) EditorInterface.Singleton.SelectFile(path);
+    }
+
+    /// <summary>
+    /// Opens a dialog that has no parent above whatever exclusive editor window is open, e.g. Project Settings or the
+    /// ePlugin Manager. Without an editor, e.g. in tests, it opens in the scene tree's root.
+    /// </summary>
+    public static void Popup(Window dialog)
+    {
+        if (Engine.IsEditorHint())
+        {
+            EditorInterface.Singleton.PopupDialogCenteredClamped(dialog, dialog.Size, 0.9f);
+            return;
+        }
+        if (!dialog.IsInsideTree()) ((SceneTree)Engine.GetMainLoop()).Root.AddChild(dialog);
+        dialog.PopupCenteredClamped(dialog.Size, 0.9f);
+    }
+
+    /// <summary>
+    /// Scales the sizes a scene authored for 100% editor scale, takes the theme's status colors for its texts, and shows the
+    /// ePlugin icon whenever it opens.
+    /// </summary>
     public static void Prepare(Window window, EditorSignalConnections signals, GodotObject owner, StringName visibilityChanged)
     {
-        var scale = EditorInterface.Singleton.GetEditorScale();
+        var scale = Scale;
+        TextColors.Use(Theme);
         window.Size = (Vector2I)((Vector2)window.Size * scale);
         window.MinSize = (Vector2I)((Vector2)window.MinSize * scale);
         ScaleMinimumSizes(window, scale);

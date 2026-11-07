@@ -12,47 +12,198 @@ namespace Enaweg.Plugin.Internal.Update;
 
 internal static class ReleaseAssets
 {
-    public static string? Select(IEnumerable<(string Name, string Url)> assets, string slug)
+    /// <summary>
+    /// The ZIP assets of a release to install as <paramref name="slug"/>: the only one, else the one named exactly like the
+    /// slug (as "lua-gdextension.zip" next to "lua-gdextension+luajit.zip"), else the one whose name contains the slug
+    /// (also with '-', '_' and '.' mixed up, as in "godot-servo-1.2.zip" for godot_servo), else the one named like an
+    /// add-on, plugin or GDExtension. Among several, a demo, example, sample or tutorial project and a build for one
+    /// platform released next to the add-on are left out, and of those left the one named like an add-on is taken, as
+    /// LimboAI's "limboai+v1.8.1.gdextension-4.6.zip" next to its engine builds and export templates. When no rule leaves
+    /// exactly one, the ones the first rule that matched several left, in the release's order: staging tries them in turn
+    /// (see <see cref="ZipPackageRef.Alternatives"/>), as godot-ai's "godot-ai-plugin.zip" (its migration plugin) and
+    /// "godot-ai-v4-plugin.zip". Empty when no rule matches any, and the source archive is installed instead.
+    /// </summary>
+    public static string[] Select(IEnumerable<(string Name, string Url)> assets, string slug)
     {
         var zips = assets.Where(a => a.Name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase) ||
             new Uri(a.Url).AbsolutePath.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)).ToArray();
-        if (zips.Length == 1) return zips[0].Url;
-        var named = zips.Where(a => a.Name.Contains(slug, StringComparison.OrdinalIgnoreCase)).ToArray();
-        if (named.Length == 1) return named[0].Url;
-        var plugin = zips.Where(a => a.Name.Contains("addon", StringComparison.OrdinalIgnoreCase) || a.Name.Contains("plugin", StringComparison.OrdinalIgnoreCase)).ToArray();
-        return plugin.Length == 1 ? plugin[0].Url : null;
+        if (zips.Length == 1) return [zips[0].Url];
+        string[]? tied = null;
+        foreach (var matches in new Func<string, bool>[]
+                 {
+                     name => Plain(Path.GetFileNameWithoutExtension(name)) == Plain(slug),
+                     name => name.Contains(slug, StringComparison.OrdinalIgnoreCase),
+                     name => Plain(name).Contains(Plain(slug), StringComparison.Ordinal),
+                     IsAddon
+                 })
+        {
+            var named = zips.Where(a => matches(a.Name)).ToArray();
+            if (named.Length > 1) named = named.Where(a => !IsExtra(a.Name) && !IsPlatform(a.Name)).ToArray();
+            if (named.Length > 1 && named.Where(a => IsAddon(a.Name)).ToArray() is { Length: > 0 } addons) named = addons;
+            if (named.Length == 1) return [named[0].Url];
+            if (named.Length > 1) tied ??= named.Select(a => a.Url).ToArray();
+        }
+        return tied ?? [];
     }
+
+    /// <summary>
+    /// The packages to try for a release: its <see cref="Select"/>ed ZIPs and, unless one was chosen, its source archive
+    /// after them, as before several equally named ZIPs were tried.
+    /// </summary>
+    public static string[] WithArchive(string[] zips, string? archive) => zips.Length == 1 || archive is null ? zips : [.. zips, archive];
+
+    private static string Plain(string name) => new(name.Where(c => c is not ('-' or '_' or '.' or ' ')).Select(char.ToLowerInvariant).ToArray());
+
+    private static readonly string[] Extras = ["demo", "example", "sample", "tutorial"];
+    private static readonly string[] Addons = ["addon", "plugin", "gdextension"];
+    private static readonly string[] Platforms = ["windows", "win", "win32", "win64", "linux", "lin", "linux64", "macos", "mac", "osx", "android", "ios", "web", "x86", "x64", "arm64", "arm32"];
+
+    /// <summary>A project released next to the add-on rather than the add-on itself.</summary>
+    private static bool IsExtra(string name) => Extras.Any(extra => name.Contains(extra, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// A build for one platform, as "godot_git-v2.1.0-linux-arm64.zip": validation cannot tell it from the one for this
+    /// editor's, so it is never tried in turn with the others.
+    /// </summary>
+    private static bool IsPlatform(string name) =>
+        Path.GetFileNameWithoutExtension(name).ToLowerInvariant().Split(Separators, StringSplitOptions.RemoveEmptyEntries).Intersect(Platforms).Any();
+    private static readonly char[] Separators = ['-', '_', '.', ' ', '+', '(', ')', '[', ']'];
+
+    /// <summary>The add-on itself, rather than an engine build, export template or library released next to it.</summary>
+    private static bool IsAddon(string name) => Addons.Any(addon => name.Contains(addon, StringComparison.OrdinalIgnoreCase));
     public static string? String(JsonElement element, string property) => element.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
     public static bool Flag(JsonElement element, string property) => element.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.True;
     public static JsonElement[] Array(JsonElement element, string property) => element.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.Array ? value.EnumerateArray().ToArray() : [];
-    public static SemVer Version(JsonElement release)
+    public static SemVer Version(JsonElement release) =>
+        TryVersion(release, out var version) ? version : throw new InvalidDataException($"Invalid release version tag: {String(release, "tag_name")}.");
+
+    /// <summary>
+    /// The version a release names: its tag, else the version its title names (<see cref="TryNamedVersion"/>), as
+    /// "4.x - v2.1.2" of GodotTouchInputManager's tag 4.x-v2.1.2, released for Godot 4 next to "3.x - v2.1.2", else the
+    /// one the words of its tag name ("v1.1.6" of v1.1.6_godot_4.6). A release the host marks as no prerelease (GitHub,
+    /// Forgejo and Gitea; GitLab has no such mark) is stable, whatever suffix its version has (<see cref="Stable"/>).
+    /// </summary>
+    public static bool TryVersion(JsonElement release, out SemVer version)
     {
-        var tag = String(release, "tag_name");
-        if (!SemVer.TryParse(tag, out var version)) throw new InvalidDataException($"Invalid release version tag: {tag}.");
-        return version;
+        if (!SemVer.TryParse(String(release, "tag_name"), out version) && !TryNamedVersion(String(release, "name"), out version) &&
+            !TryNamedVersion(String(release, "tag_name"), out version)) return false;
+        if (release.TryGetProperty("prerelease", out var prerelease) && prerelease.ValueKind == JsonValueKind.False) version = Stable(version);
+        return true;
+    }
+
+    /// <summary>
+    /// The version of a release its host publishes as no prerelease. Some add-ons tag every release with a suffix that
+    /// names no prerelease, such as Aseprite Wizard's v9.8.0-4 for Godot 4, whose plugin.cfg says 9.8.0: it is offered as
+    /// version 9.8.0 to stable installs. A suffix that names a prerelease stage (beta, rc, dev...) keeps it a prerelease,
+    /// since the host's mark is only the default an author did not change.
+    /// </summary>
+    public static SemVer Stable(SemVer version) => version.NamesStage ? version : version.WithoutPrerelease();
+
+    /// <summary>
+    /// The version a text names as one of its words, the first from the start. Words are split at spaces and '_', and
+    /// one that is no version also at '-' ("godot4-v1.4.4"; "v2.0.0-beta" stays a prerelease). A version right after the
+    /// word Godot is the engine's ("for Godot 4.4+") and skipped; any other number after the version makes the text name
+    /// none, since it may be the actual version: "Release candidate 1.0.0 - 7", "v1.2.1 [GD Script - 4.4]".
+    /// </summary>
+    internal static bool TryNamedVersion(string? text, out SemVer version)
+    {
+        var words = (text ?? "").Split([' ', '_'], StringSplitOptions.RemoveEmptyEntries)
+            .SelectMany(w => SemVer.TryParse(w, out _) ? [w] : w.Split('-', StringSplitOptions.RemoveEmptyEntries)).ToArray();
+        for (var i = 0; i < words.Length; i++)
+        {
+            if (i > 0 && IsGodot(words[i - 1]) || !SemVer.TryParse(words[i], out version)) continue;
+            for (var j = i + 1; j < words.Length; j++)
+                if (words[j].Any(char.IsAsciiDigit) && !IsGodot(words[j - 1])) { version = default; return false; }
+            return true;
+        }
+        version = default;
+        return false;
+
+        // "(Godot" too, but not "godot4", which names no engine version after it.
+        static bool IsGodot(string word) => new string(word.Where(char.IsAsciiLetterOrDigit).ToArray()).Equals("godot", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// The releases grouped by the version they name, in the host's order (newest first), also within a group. Several
+    /// releases of one version are builds for different Godot versions: staging tries their packages in that order and
+    /// installs the first it accepts (see <see cref="ZipPackageRef.Alternatives"/>).
+    /// </summary>
+    public static JsonElement[][] ByVersion(IEnumerable<JsonElement> releases) =>
+        releases.Where(r => TryVersion(r, out _)).GroupBy(r => Version(r).Key).Select(g => g.ToArray()).ToArray();
+
+    /// <summary>The releases of the newest version <paramref name="target"/> is offered, or null.</summary>
+    public static JsonElement[]? Newest(IEnumerable<JsonElement> releases, PluginUpdateTarget target) =>
+        ByVersion(releases).Where(g => UpdateService.Offers(target, Version(g[0]))).OrderByDescending(g => Version(g[0])).FirstOrDefault();
+
+    /// <summary>
+    /// The releases of the newest version <paramref name="target"/> is offered, reading the host's pages (newest first)
+    /// until one has such a version, at most <paramref name="pages"/>: a stable install is offered no prerelease, and the
+    /// last few dozen releases of an add-on may all be prereleases or nightly builds. <paramref name="page"/> returns a
+    /// page's releases (without drafts) and whether it was full, so that another one may follow.
+    /// </summary>
+    public static async Task<JsonElement[]?> NewestAsync(Func<int, Task<(JsonElement[] Releases, bool Full)>> page, int pages,
+        PluginUpdateTarget target)
+    {
+        var releases = new List<JsonElement>();
+        for (var number = 1; number <= pages; number++)
+        {
+            var (read, full) = await page(number).ConfigureAwait(false);
+            releases.AddRange(read);
+            if (Newest(releases, target) is { } newest) return newest;
+            if (!full) break;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// The first package of the first release, with its other packages and the other releases' as alternatives; a release
+    /// without a ZIP (<paramref name="download"/> returns none) is left out.
+    /// </summary>
+    /// <exception cref="IOException">None of the releases has a ZIP.</exception>
+    public static ZipPackageRef Package(IReadOnlyList<JsonElement> releases, string slug, Func<JsonElement, IEnumerable<string>> download)
+    {
+        var urls = releases.SelectMany(download).Distinct(StringComparer.Ordinal).ToArray();
+        if (urls.Length == 0) throw new IOException("Release has no ZIP package.");
+        return new(urls[0], slug, urls.Length > 1 ? urls[1..] : null);
     }
 }
 
-internal sealed class GitHubReleaseSource(UpdateHttp http, string owner, string repository, bool pinned = false) : IUpdateSource, IVersionListSource
+/// <param name="token">
+/// The GitHub token of the environment, if any. With one, packages are downloaded through the API as well: the download
+/// links on github.com take no token, so those of a private repository could not be downloaded.
+/// </param>
+internal sealed class GitHubReleaseSource(UpdateHttp http, string owner, string repository, bool pinned = false, string? token = null)
+    : IUpdateSource, IVersionListSource
 {
-    private static string? Token => Environment.GetEnvironmentVariable("EPLUGIN_GITHUB_TOKEN") ?? Environment.GetEnvironmentVariable("GITHUB_TOKEN");
+    // A check reads up to two pages of 50, as many releases as the version list reads at once.
+    private const int CheckPageSize = 50;
     public async Task<IReadOnlyList<UpdateCandidate>> ListAsync(PluginUpdateTarget target, UpdateCheckOptions options, CancellationToken ct)
     {
         if (pinned) return [];
-        using var document = JsonDocument.Parse(await http.ReadTextAsync($"https://api.github.com/repos/{owner}/{repository}/releases?per_page=100", ct, Token).ConfigureAwait(false));
-        return document.RootElement.EnumerateArray()
-            .Where(r => !ReleaseAssets.Flag(r, "draft") && SemVer.TryParse(ReleaseAssets.String(r, "tag_name"), out _))
+        using var document = JsonDocument.Parse(await http.ReadTextAsync($"https://api.github.com/repos/{owner}/{repository}/releases?per_page=100", ct, token).ConfigureAwait(false));
+        return ReleaseAssets.ByVersion(document.RootElement.EnumerateArray().Where(r => !ReleaseAssets.Flag(r, "draft")))
             .Select(r => Candidate(target, r)).ToArray();
     }
-    private UpdateCandidate Candidate(PluginUpdateTarget target, JsonElement release)
+    /// <param name="releases">The releases of one version; the first is announced, the others are alternatives.</param>
+    private UpdateCandidate Candidate(PluginUpdateTarget target, JsonElement[] releases)
     {
         var root = $"https://github.com/{owner}/{repository}";
+        var release = releases[0];
         var tag = ReleaseAssets.String(release, "tag_name")!;
         var version = ReleaseAssets.Version(release);
-        var assets = ReleaseAssets.Array(release, "assets").Select(a => (ReleaseAssets.String(a, "name") ?? "", ReleaseAssets.String(a, "browser_download_url") ?? "")).Where(a => a.Item2.Length > 0);
-        var download = ReleaseAssets.Select(assets, target.Slug) ?? $"{root}/archive/refs/tags/{Uri.EscapeDataString(tag)}.zip";
         return new(target.Slug, target.Name, target.InstalledVersion, version.ToString(), target.UpdateUrl,
-            ReleaseAssets.String(release, "html_url") ?? $"{root}/releases/tag/{Uri.EscapeDataString(tag)}", tag, new ZipPackageRef(download, target.Slug));
+            ReleaseAssets.String(release, "html_url") ?? $"{root}/releases/tag/{Uri.EscapeDataString(tag)}", tag,
+            ReleaseAssets.Package(releases, target.Slug, Download));
+
+        string[] Download(JsonElement r)
+        {
+            var api = token is not null;
+            var assets = ReleaseAssets.Array(r, "assets").Select(a => (ReleaseAssets.String(a, "name") ?? "",
+                ReleaseAssets.String(a, api ? "url" : "browser_download_url") ?? "")).Where(a => a.Item2.Length > 0);
+            var tag = Uri.EscapeDataString(ReleaseAssets.String(r, "tag_name")!);
+            return ReleaseAssets.WithArchive(ReleaseAssets.Select(assets, target.Slug),
+                api ? $"https://api.github.com/repos/{owner}/{repository}/zipball/{tag}" : $"{root}/archive/refs/tags/{tag}.zip");
+        }
     }
     public async Task<UpdateCandidate?> CheckAsync(PluginUpdateTarget target, UpdateCheckOptions options, CancellationToken ct)
     {
@@ -60,12 +211,14 @@ internal sealed class GitHubReleaseSource(UpdateHttp http, string owner, string 
         var root = $"https://github.com/{owner}/{repository}";
         try
         {
-            using var document = JsonDocument.Parse(await http.ReadTextAsync($"https://api.github.com/repos/{owner}/{repository}/releases?per_page=30", ct, Token).ConfigureAwait(false));
-            var release = document.RootElement.EnumerateArray()
-                .Where(r => !ReleaseAssets.Flag(r, "draft") && SemVer.TryParse(ReleaseAssets.String(r, "tag_name"), out var v) &&
-                    UpdateService.Offers(target, v))
-                .OrderByDescending(ReleaseAssets.Version).Select(r => (JsonElement?)r).FirstOrDefault();
-            return release is null ? null : Candidate(target, release.Value);
+            var releases = await ReleaseAssets.NewestAsync(async page =>
+            {
+                using var document = JsonDocument.Parse(await http.ReadTextAsync(
+                    $"https://api.github.com/repos/{owner}/{repository}/releases?per_page={CheckPageSize}&page={page}", ct, token).ConfigureAwait(false));
+                var list = document.RootElement.EnumerateArray().Select(r => r.Clone()).ToArray();
+                return (list.Where(r => !ReleaseAssets.Flag(r, "draft")).ToArray(), list.Length == CheckPageSize);
+            }, 2, target).ConfigureAwait(false);
+            return releases is null ? null : Candidate(target, releases);
         }
         catch (UpdateHttpException ex) when (ex.RateLimited)
         {
@@ -74,6 +227,8 @@ internal sealed class GitHubReleaseSource(UpdateHttp http, string owner, string 
             var path = final.AbsolutePath;
             var marker = path.IndexOf("/releases/tag/", StringComparison.Ordinal);
             if (final.Host != "github.com" || marker < 0 || !SemVer.TryParse(Uri.UnescapeDataString(path[(marker + 14)..]), out var version)) throw;
+            // GitHub's latest release is never one it marks as a prerelease.
+            version = ReleaseAssets.Stable(version);
             if (!UpdateService.Offers(target, version)) return null;
             var tag = Uri.UnescapeDataString(path[(marker + 14)..]);
             return new(target.Slug, target.Name, target.InstalledVersion, version.ToString(), target.UpdateUrl, final.ToString(), tag,
@@ -81,45 +236,103 @@ internal sealed class GitHubReleaseSource(UpdateHttp http, string owner, string 
         }
     }
 }
-internal sealed class GitLabReleaseSource(UpdateHttp http, string host, string project, bool pinned = false) : IUpdateSource, IVersionListSource
+/// <param name="log">Reports a release left out of the version list because it has no package to install.</param>
+internal sealed class GitLabReleaseSource(UpdateHttp http, string host, string project, bool pinned = false, Action<string>? log = null)
+    : IUpdateSource, IVersionListSource
 {
-    private async Task<JsonElement[]> Releases(int count, CancellationToken ct)
+    /// <summary>One page of <paramref name="count"/> releases, and whether it was full.</summary>
+    private async Task<(JsonElement[] Releases, bool Full)> Releases(int count, int page, CancellationToken ct)
     {
-        var token = Environment.GetEnvironmentVariable("EPLUGIN_GITLAB_TOKEN") ?? Environment.GetEnvironmentVariable("GITLAB_TOKEN");
-        using var document = JsonDocument.Parse(await http.ReadTextAsync($"https://{host}/api/v4/projects/{Uri.EscapeDataString(project)}/releases?per_page={count}", ct, token, true).ConfigureAwait(false));
-        return document.RootElement.EnumerateArray().Where(r => !ReleaseAssets.Flag(r, "upcoming_release") &&
-            SemVer.TryParse(ReleaseAssets.String(r, "tag_name"), out _))
-            .Select(r => r.Clone()).ToArray();
+        var url = $"https://{host}/api/v4/projects/{Uri.EscapeDataString(project)}/releases?per_page={count}&page={page}";
+        using var document = JsonDocument.Parse(await http.ReadTextAsync(url, ct, ForgeTokens.GitLab(new Uri(url)), true).ConfigureAwait(false));
+        var list = document.RootElement.EnumerateArray().ToArray();
+        return (list.Where(r => !ReleaseAssets.Flag(r, "upcoming_release") && ReleaseAssets.TryVersion(r, out _)).Select(r => r.Clone()).ToArray(),
+            list.Length == count);
     }
     public async Task<UpdateCandidate?> CheckAsync(PluginUpdateTarget target, UpdateCheckOptions options, CancellationToken ct)
     {
         if (pinned) return null;
-        var release = (await Releases(30, ct).ConfigureAwait(false))
-            .Where(r => SemVer.TryParse(ReleaseAssets.String(r, "tag_name"), out var v) && UpdateService.Offers(target, v))
-            .OrderByDescending(ReleaseAssets.Version).Select(r => (JsonElement?)r).FirstOrDefault();
-        return release is null ? null : Candidate(target, release.Value);
+        // Up to two pages of 50, as many releases as the version list reads at once.
+        var releases = await ReleaseAssets.NewestAsync(page => Releases(50, page, ct), 2, target).ConfigureAwait(false);
+        return releases is null ? null : Candidate(target, releases);
     }
     public async Task<IReadOnlyList<UpdateCandidate>> ListAsync(PluginUpdateTarget target, UpdateCheckOptions options, CancellationToken ct)
     {
         if (pinned) return [];
         var candidates = new List<UpdateCandidate>();
         // A release without a ZIP cannot be installed; leave it out instead of failing the whole list.
-        foreach (var release in await Releases(100, ct).ConfigureAwait(false))
-            try { candidates.Add(Candidate(target, release)); } catch (IOException) { }
+        foreach (var releases in ReleaseAssets.ByVersion((await Releases(100, 1, ct).ConfigureAwait(false)).Releases))
+            try { candidates.Add(Candidate(target, releases)); }
+            catch (IOException ex)
+            {
+                log?.Invoke($"Release {ReleaseAssets.String(releases[0], "tag_name")} of {host}/{project} is not listed for {target.Slug}: {ex.Message}");
+            }
         return candidates;
     }
-    private UpdateCandidate Candidate(PluginUpdateTarget target, JsonElement release)
+    /// <param name="releases">The releases of one version; the first is announced, the others are alternatives.</param>
+    private UpdateCandidate Candidate(PluginUpdateTarget target, JsonElement[] releases)
     {
+        var release = releases[0];
         var tag = ReleaseAssets.String(release, "tag_name")!;
         var version = ReleaseAssets.Version(release);
-        var assets = release.GetProperty("assets");
-        var download = ReleaseAssets.Select(ReleaseAssets.Array(assets, "links").Select(a =>
-            (ReleaseAssets.String(a, "name") ?? "", ReleaseAssets.String(a, "direct_asset_url") ?? ReleaseAssets.String(a, "url") ?? "")).Where(a => a.Item2.Length > 0), target.Slug)
-            ?? ReleaseAssets.Array(assets, "sources").Where(a => ReleaseAssets.String(a, "format") == "zip").Select(a => ReleaseAssets.String(a, "url")).FirstOrDefault();
-        if (download is null) throw new IOException("Release has no ZIP package.");
+        var package = ReleaseAssets.Package(releases, target.Slug, r =>
+        {
+            var assets = r.GetProperty("assets");
+            return ReleaseAssets.WithArchive(ReleaseAssets.Select(ReleaseAssets.Array(assets, "links").Select(a =>
+                (ReleaseAssets.String(a, "name") ?? "", ReleaseAssets.String(a, "direct_asset_url") ?? ReleaseAssets.String(a, "url") ?? "")).Where(a => a.Item2.Length > 0), target.Slug),
+                ReleaseAssets.Array(assets, "sources").Where(a => ReleaseAssets.String(a, "format") == "zip").Select(a => ReleaseAssets.String(a, "url")).FirstOrDefault());
+        });
         var link = release.TryGetProperty("_links", out var links) ? ReleaseAssets.String(links, "self") : null;
         return new(target.Slug, target.Name, target.InstalledVersion, version.ToString(), target.UpdateUrl,
-            link ?? $"https://{host}/{project}/-/releases/{Uri.EscapeDataString(tag)}", tag, new ZipPackageRef(download, target.Slug));
+            link ?? $"https://{host}/{project}/-/releases/{Uri.EscapeDataString(tag)}", tag, package);
+    }
+}
+/// <summary>Releases of Forgejo and Gitea, which share their API, such as Codeberg's: https://host/owner/repository/releases.</summary>
+internal sealed class ForgejoReleaseSource(UpdateHttp http, string host, string owner, string repository, bool pinned = false) : IUpdateSource, IVersionListSource
+{
+    // Forgejo and Gitea return at most 50 releases per page.
+    private const int PageSize = 50;
+    /// <summary>One page of releases, and whether it was full.</summary>
+    private async Task<(JsonElement[] Releases, bool Full)> Releases(int page, CancellationToken ct)
+    {
+        var url = $"https://{host}/api/v1/repos/{Uri.EscapeDataString(owner)}/{Uri.EscapeDataString(repository)}/releases?limit={PageSize}&page={page}";
+        using var document = JsonDocument.Parse(await http.ReadTextAsync(url, ct, ForgeTokens.Forgejo(new Uri(url))).ConfigureAwait(false));
+        var list = document.RootElement.EnumerateArray().Select(r => r.Clone()).ToArray();
+        return (list.Where(r => !ReleaseAssets.Flag(r, "draft") && ReleaseAssets.TryVersion(r, out _)).ToArray(), list.Length == PageSize);
+    }
+    public async Task<UpdateCandidate?> CheckAsync(PluginUpdateTarget target, UpdateCheckOptions options, CancellationToken ct)
+    {
+        if (pinned) return null;
+        var releases = await ReleaseAssets.NewestAsync(page => Releases(page, ct), 2, target).ConfigureAwait(false);
+        return releases is null ? null : Candidate(target, releases);
+    }
+    public async Task<IReadOnlyList<UpdateCandidate>> ListAsync(PluginUpdateTarget target, UpdateCheckOptions options, CancellationToken ct)
+    {
+        if (pinned) return [];
+        var releases = new List<JsonElement>();
+        for (var page = 1; page <= 2; page++)
+        {
+            var (read, full) = await Releases(page, ct).ConfigureAwait(false);
+            releases.AddRange(read);
+            if (!full) break;
+        }
+        return ReleaseAssets.ByVersion(releases).Select(r => Candidate(target, r)).ToArray();
+    }
+    /// <param name="releases">The releases of one version; the first is announced, the others are alternatives.</param>
+    private UpdateCandidate Candidate(PluginUpdateTarget target, JsonElement[] releases)
+    {
+        var root = $"https://{host}/{owner}/{repository}";
+        var release = releases[0];
+        var tag = ReleaseAssets.String(release, "tag_name")!;
+        var version = ReleaseAssets.Version(release);
+        return new(target.Slug, target.Name, target.InstalledVersion, version.ToString(), target.UpdateUrl,
+            ReleaseAssets.String(release, "html_url") ?? $"{root}/releases/tag/{Uri.EscapeDataString(tag)}", tag,
+            ReleaseAssets.Package(releases, target.Slug, r =>
+            {
+                var assets = ReleaseAssets.Array(r, "assets").Select(a => (ReleaseAssets.String(a, "name") ?? "", ReleaseAssets.String(a, "browser_download_url") ?? "")).Where(a => a.Item2.Length > 0);
+                return ReleaseAssets.WithArchive(ReleaseAssets.Select(assets, target.Slug), ReleaseAssets.String(r, "zipball_url") ??
+                    $"{root}/archive/{Uri.EscapeDataString(ReleaseAssets.String(r, "tag_name")!)}.zip");
+            }));
     }
 }
 #endif

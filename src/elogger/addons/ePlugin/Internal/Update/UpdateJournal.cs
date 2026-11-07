@@ -24,6 +24,43 @@ internal sealed class UpdatePluginJournal
     public bool SwapStarted { get; set; }
     public List<string> Preserved { get; set; } = [];
     public Dictionary<string, string> Uids { get; set; } = [];
+    /// <summary>
+    /// The <see cref="Kinds.PluginKind"/> whose workflow updates the plugin, by name; null in journals written before it
+    /// was recorded, which <see cref="Kinds.PluginKinds.Workflow(UpdatePluginJournal)"/> derives from <see cref="IsEPlugin"/>.
+    /// </summary>
+    public string? Kind { get; set; }
+    /// <summary>
+    /// The installed or the new version ships a GDExtension, so its files are replaced one by one (see
+    /// <see cref="Kinds.EPluginWorkflow"/>); a GDExtension plugin always is.
+    /// </summary>
+    public bool NativeExtension { get; set; }
+    /// <summary>The editor has to restart to load the plugin's native libraries as they are now (GDExtension plugins).</summary>
+    public bool RestartRequired { get; set; }
+    /// <summary>The new native libraries were reloaded in place, so the editor runs them although it did not restart.</summary>
+    public bool ReloadedInPlace { get; set; }
+    /// <summary>The editor process <see cref="RestartRequired"/> and <see cref="ReloadedInPlace"/> refer to.</summary>
+    public string? NativeSession { get; set; }
+    /// <summary>
+    /// The source of the new version's license the user accepted, recorded when the update commits: until then the
+    /// installed version's accepted license stays, also when the update is rolled back. Null when none was asked about.
+    /// </summary>
+    public string? AcceptedLicense { get; set; }
+    /// <summary>
+    /// The plugin folder is a git submodule, updated by checking out <see cref="SubmoduleJournal.NewCommit"/> and rolled
+    /// back by checking out <see cref="SubmoduleJournal.OldCommit"/> (<see cref="SubmoduleSwap"/>); null for a package
+    /// update. Journals without it are package updates.
+    /// </summary>
+    public SubmoduleJournal? Submodule { get; set; }
+}
+/// <summary>The commits of a submodule update, see <see cref="UpdatePluginJournal.Submodule"/>.</summary>
+internal sealed class SubmoduleJournal
+{
+    /// <summary>The commit the submodule was at before the update.</summary>
+    public string OldCommit { get; set; } = "";
+    /// <summary>The commit of the version tag the update checks out.</summary>
+    public string NewCommit { get; set; } = "";
+    /// <summary>The version tag of the submodule's remote, for messages.</summary>
+    public string Tag { get; set; } = "";
 }
 internal sealed record JournalBuild(string Name, int ExitCode, string LogFile);
 internal sealed class UpdateJournal
@@ -52,37 +89,72 @@ internal sealed class UpdateJournal
     /// </summary>
     public bool AskOnBuildFailure { get; set; }
     /// <summary>
-    /// Kept, or awaiting the decision, after a build that ran before the recipes were reconciled: Retry failed resumes
+    /// Kept, or awaiting the decision, after a build that ran before the recipes were reconciled: Retry resumes
     /// the update with reconciling once the project builds.
     /// </summary>
     public bool BeforeReconcile { get; set; }
+    /// <summary>Where the errors of the last failed build were; null while no build failed.</summary>
+    public BuildFailureCause? FailureCause { get; set; }
+    /// <summary>
+    /// Whether the plugins compiled on their own after a build failed only in project code; null when that was not
+    /// tried. True keeps the update: the project's code has to be adapted to the new version.
+    /// </summary>
+    public bool? PluginsBuildAlone { get; set; }
+    /// <summary>The errors in project code of the last failed build, at most <see cref="BuildDiagnostics.MaxProjectErrors"/>.</summary>
+    public List<BuildError> ProjectErrors { get; set; } = [];
+    /// <summary>
+    /// A rollback leaves the project files as they are rather than restoring <c>backup-project</c>: set once a rollback
+    /// (or early recovery) restored them, so a retry after a failed rollback build does not overwrite the repairs made
+    /// since, and for an update that reconciled its recipes before it was kept or its acknowledgement failed, whose backup
+    /// predates what changed while it waited and whose recipe changes Reconcile undoes. Older readers ignore it.
+    /// </summary>
+    public bool KeepProjectFiles { get; set; }
+    /// <summary>Kept because only project code failed and the plugins compile on their own.</summary>
+    [JsonIgnore] public bool KeptForProjectCode => FailureCause == BuildFailureCause.ProjectCode && PluginsBuildAlone == true;
     [JsonIgnore] public string Directory { get; set; } = "";
     public string Backup(string slug) => PackageFiles.Inside(Path.Combine(Directory, "backup"), slug);
     public string Staging(string slug) => PackageFiles.Inside(Path.Combine(Directory, "staging"), slug);
+    /// <summary>Where files go that were still in use and could only be moved, not deleted; removed with the journal.</summary>
+    public string Discarded(string slug) => PackageFiles.Inside(Path.Combine(Directory, "discarded"), slug);
     public bool IsActive => State is not (UpdatePhase.RolledBack or UpdatePhase.Committed or UpdatePhase.CommittedWithErrors or UpdatePhase.Failed);
     public void Save(UpdatePhase? state = null) { if (state is not null) State = state.Value; AtomicJson.Write(Path.Combine(Directory, "journal.json"), this); }
     public static UpdateJournal Load(string directory)
     {
         var journal = JsonSerializer.Deserialize<UpdateJournal>(File.ReadAllText(Path.Combine(directory, "journal.json")), UpdateStateStore.JsonOptions) ?? throw new InvalidDataException("Empty update journal.");
+        // The serializer accepts an explicit null for any entry, which the checks below would otherwise dereference.
+        try { Validate(journal, directory); }
+        catch (NullReferenceException) { throw new InvalidDataException("Update journal has missing entries; restore its backups manually."); }
+        journal.Directory = directory;
+        return journal;
+    }
+
+    private static void Validate(UpdateJournal journal, string directory)
+    {
         if (journal.Schema is < 1 or > 1 || journal.Id != Path.GetFileName(directory) || journal.AttemptId == Guid.Empty || !Enum.IsDefined(journal.State) || journal.Plugins is null || journal.Plugins.Count == 0 || journal.Recipes is null || journal.ProjectFiles is null || journal.AdditionalVersions is null || journal.Builds is null ||
             journal.Plugins.Select(p => p.Slug).Distinct(StringComparer.Ordinal).Count() != journal.Plugins.Count)
             throw new InvalidDataException("Unsupported or invalid update journal; restore its backups manually.");
+        // The old version is empty for a GDExtension add-on installed over a version ePlugin did not know.
         foreach (var plugin in journal.Plugins)
             if (PackageFiles.Normalize(plugin.Slug) != plugin.Slug || plugin.Slug.Contains('/') ||
-                !SemVer.TryParse(plugin.OldVersion, out _) || !SemVer.TryParse(plugin.NewVersion, out _))
+                !(plugin.OldVersion.Length == 0 || SemVer.TryParse(plugin.OldVersion, out _)) || !SemVer.TryParse(plugin.NewVersion, out _))
                 throw new InvalidDataException("Invalid plugin in update journal.");
+        foreach (var submodule in journal.Plugins.Select(p => p.Submodule).OfType<SubmoduleJournal>())
+            if (!GitSource.IsCommit(submodule.OldCommit) || !GitSource.IsCommit(submodule.NewCommit) || submodule.Tag is null || submodule.Tag.Any(char.IsControl))
+                throw new InvalidDataException("Invalid submodule update in update journal.");
         foreach (var path in journal.ProjectFiles)
             if (PackageFiles.Normalize(path) != path || path.Contains('/')) throw new InvalidDataException("Invalid project backup path.");
         foreach (var recipe in journal.Recipes)
         {
-            if (PackageFiles.Normalize(recipe.Key) != recipe.Key || recipe.Key.Contains('/')) throw new InvalidDataException("Invalid recipe owner.");
+            // Every activated ePlugin's recipe is recorded, also one of a plugin in a subfolder (acme/tool), which updates
+            // never update themselves.
+            if (PackageFiles.Normalize(recipe.Key) != recipe.Key) throw new InvalidDataException("Invalid recipe owner.");
             RecipeReconciler.Validate(recipe.Value.Old);
             RecipeReconciler.Validate(recipe.Value.Applied);
             if (recipe.Value.Target is not null) RecipeReconciler.Validate(recipe.Value.Target);
         }
         foreach (var plugin in journal.Plugins) foreach (var path in plugin.Preserved) PackageFiles.Normalize(path);
-        journal.Directory = directory;
-        return journal;
+        // Only shown to the user: a journal without them, or with an invalid list, is still recoverable.
+        journal.ProjectErrors = journal.ProjectErrors?.Where(e => e is not null).ToList() ?? [];
     }
 }
 internal sealed class UpdateJournals(string root, Action<string>? log = null)
@@ -94,12 +166,20 @@ internal sealed class UpdateJournals(string root, Action<string>? log = null)
         foreach (var folder in System.IO.Directory.GetDirectories(root))
         {
             if (!File.Exists(Path.Combine(folder, "journal.json"))) continue;
+            // A journal Load refuses is skipped like an unreadable one, so it cannot stop every other update.
             try { result.Add(UpdateJournal.Load(folder)); }
-            catch (Exception ex) when (ex is IOException or JsonException or ArgumentException) { log?.Invoke($"Cannot read update journal {folder}: {ex.Message}"); }
+            catch (Exception ex) when (ex is IOException or JsonException or ArgumentException or InvalidDataException) { log?.Invoke($"Cannot read update journal {folder}: {ex.Message}"); }
         }
         // Groups of one batch resume in the order they were applied: a later group built on top of the earlier ones.
         return result.OrderBy(j => j.CreatedUtc).ThenBy(j => j.Group ?? 0).ToList();
     }
+    /// <summary>
+    /// Folders without a journal last written before <paramref name="before"/>: batches the ePlugin Manager staged but did
+    /// not install. It deletes those itself, but an assembly reload or a crash forgets them.
+    /// </summary>
+    public IReadOnlyList<string> AbandonedStaging(DateTime before) => !System.IO.Directory.Exists(root) ? []
+        : System.IO.Directory.GetDirectories(root)
+            .Where(folder => !File.Exists(Path.Combine(folder, "journal.json")) && System.IO.Directory.GetLastWriteTimeUtc(folder) < before).ToArray();
     public bool OwnsAttempt(Guid? id) => id is not null && Read().Any(j => j.IsActive && j.AttemptId == id);
     public IReadOnlySet<string> OwnedSlugs => Read().Where(j => j.IsActive).SelectMany(j => j.Plugins.Select(p => p.Slug).Concat(j.AdditionalVersions.Keys)).ToHashSet(StringComparer.Ordinal);
     public string NewDirectory() => Path.Combine(root, DateTimeOffset.UtcNow.ToString("yyyyMMddTHHmmss", CultureInfo.InvariantCulture) + "-" + Guid.NewGuid().ToString("N")[..8]);

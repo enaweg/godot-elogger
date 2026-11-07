@@ -19,7 +19,11 @@ internal static class UpdateRecovery
         public string Slug { get; set; } = "";
         public string OldVersion { get; set; } = "";
         public bool SwapStarted { get; set; }
+        public List<string> Preserved { get; set; } = [];
+        /// <summary>Set for a git submodule, which is restored by checking out its old commit rather than from the backup.</summary>
+        public Submodule? Submodule { get; set; }
     }
+    private sealed class Submodule { public string OldCommit { get; set; } = ""; }
     private sealed class Snapshot { public int SchemaVersion { get; set; } = 1; public List<string> Directories { get; set; } = []; }
     private sealed class Recipe
     {
@@ -35,6 +39,7 @@ internal static class UpdateRecovery
         public int StartCount { get; set; }
         public List<Plugin> Plugins { get; set; } = [];
         public List<string> ProjectFiles { get; set; } = [];
+        public bool KeepProjectFiles { get; set; }
         public Dictionary<string, Recipe> Recipes { get; set; } = [];
     }
     private static readonly JsonSerializerOptions Options = new() { PropertyNameCaseInsensitive = true, WriteIndented = true };
@@ -75,10 +80,20 @@ internal static class UpdateRecovery
                     if (plugin.SwapStarted && !Directory.Exists(backup) &&
                         (!File.Exists(Path.Combine(installed, "plugin.cfg")) || !HasVersion(Path.Combine(installed, "plugin.cfg"), plugin.OldVersion)))
                         throw new IOException("Missing backup for " + plugin.Slug);
+                    if (plugin.Submodule is { } submodule)
+                    {
+                        if (!GitSource.IsCommit(submodule.OldCommit) || plugin.Preserved.Any(p => p.Split('/', '\\').Contains("..")))
+                            throw new InvalidDataException("Invalid submodule update of " + plugin.Slug);
+                    }
+                    // Copying the backup over it would delete the repository; no swap replaces such a folder either.
+                    else if (Directory.Exists(backup) && PluginRepository.HoldsRepository(installed))
+                        throw new IOException($"{installed} holds a git repository, which restoring the backup would delete");
                 }
-                foreach (var file in journal.ProjectFiles)
+                // Restored already, by an earlier start or a rollback whose build failed: the project may have been repaired since.
+                var (projectBackup, projectFiles) = journal.KeepProjectFiles ? ("", []) : ProjectBackup.Find(folder, journal.ProjectFiles);
+                foreach (var file in projectFiles)
                 {
-                    if (file.Contains('/') || file.Contains('\\') || !File.Exists(Inside(Path.Combine(folder, "backup-project"), file)))
+                    if (file.Contains('/') || file.Contains('\\') || !File.Exists(Inside(projectBackup, file)))
                         throw new IOException("Missing or invalid project backup: " + file);
                 }
                 recoveringAttempt = journal.AttemptId;
@@ -88,13 +103,20 @@ internal static class UpdateRecovery
                     var backup = Inside(Path.Combine(folder, "backup"), plugin.Slug);
                     if (!Directory.Exists(backup)) continue;
                     var installed = Inside(Path.Combine(projectRoot, "addons"), plugin.Slug);
-                    if (Directory.Exists(installed)) Directory.Delete(installed, true);
+                    if (plugin.Submodule is { } submodule)
+                    {
+                        // The backup was written before the checkout; checking out the old commit is repeatable too.
+                        RestoreSubmodule(installed, plugin.Preserved, submodule.OldCommit);
+                        continue;
+                    }
+                    AddonFiles.DeleteTree(installed);
                     // Copy, rather than consume, backups so interrupted early recovery is repeatable.
                     Copy(backup, installed);
                 }
                 foreach (var recipe in journal.Recipes.Where(r => !journal.Plugins.Any(p => p.Slug == r.Key)))
                 {
-                    Slug(recipe.Key);
+                    // an ePlugin in a subfolder (acme/tool) owns a recipe too
+                    RecipeOwner(recipe.Key);
                     var addon = Inside(Path.Combine(projectRoot, "addons"), recipe.Key);
                     var applied = recipe.Value.Applied.Directories.ToList();
                     if (recipe.Value.Pending.ValueKind == JsonValueKind.Object && recipe.Value.Pending.TryGetProperty("directory", out var pending) && pending.ValueKind == JsonValueKind.String)
@@ -102,9 +124,13 @@ internal static class UpdateRecovery
                     foreach (var dir in applied.Where(d => !recipe.Value.Old.Directories.Contains(d)).OrderByDescending(d => d.Length)) Visibility(addon, recipe.Key, dir, false);
                     foreach (var dir in recipe.Value.Old.Directories.OrderBy(d => d.Length)) Visibility(addon, recipe.Key, dir, true);
                 }
-                foreach (var file in journal.ProjectFiles) File.Copy(Inside(Path.Combine(folder, "backup-project"), file), Inside(projectRoot, file), true);
-                if (!journal.ProjectFiles.Any(f => f.Equals("nuget.config", StringComparison.OrdinalIgnoreCase)) && File.Exists(Path.Combine(projectRoot, "nuget.config"))) File.Delete(Path.Combine(projectRoot, "nuget.config"));
-                restoreSettings();
+                if (!journal.KeepProjectFiles)
+                {
+                    foreach (var file in projectFiles) AddonFiles.Overwrite(Inside(projectBackup, file), Inside(projectRoot, file));
+                    if (!projectFiles.Any(f => f.Equals("nuget.config", StringComparison.OrdinalIgnoreCase))) AddonFiles.DeleteFile(Path.Combine(projectRoot, "nuget.config"));
+                    json["keepProjectFiles"] = true; Write(path, json);
+                    restoreSettings();
+                }
                 if (!rebuild()) throw new IOException("Restored project failed to build.");
                 if (store.LocalAttempts.Any(a => a.AttemptId == journal.AttemptId) && !store.TryAbandonAttempt(journal.AttemptId)) throw new IOException("Cannot clear restored update marker.");
                 json["state"] = "RolledBack";
@@ -141,20 +167,29 @@ internal static class UpdateRecovery
                     }
                     catch (Exception) { /* Preserve backups even if the marker cannot be written. */ }
                 }
-                logger.Error($"Self-update recovery needs manual repair: {ex.Message}. Close the editor, restore {folder}/backup/<slug> to addons/<slug> and backup-project files to the project root, delete .godot/mono/temp, rebuild, then use Retry failed in the ePlugin Manager. See {folder}/README.txt.");
+                logger.Error($"Self-update recovery needs manual repair: {ex.Message}. Close the editor, restore {folder}/backup/<slug> to addons/<slug> and backup-project files to the project root, delete .godot/mono/temp, rebuild, then use Retry under Needs attention in the ePlugin Manager. See {folder}/README.txt.");
                 return Outcome.ManualRepair;
             }
         }
         return Outcome.Continue;
     }
-    private static void Write(string path, JsonObject json)
+    /// <summary>Checks out the commit a submodule had before the update; refuses uncommitted changes, which it would mix in.</summary>
+    private static void RestoreSubmodule(string installed, IReadOnlyList<string> preserved, string commit)
     {
-        var temporary = path + ".recovery.tmp";
-        using (var stream = new FileStream(temporary, FileMode.Create, FileAccess.Write, FileShare.None))
-        { JsonSerializer.Serialize(stream, json, Options); stream.Flush(true); }
-        File.Move(temporary, path, true);
+        var git = new GitRunner(allowFileProtocol: true);
+        foreach (var path in preserved.OrderByDescending(p => p.Length))
+        {
+            var full = Inside(installed, path);
+            if (Directory.Exists(full)) AddonFiles.DeleteTree(full);
+            else AddonFiles.DeleteFile(full);
+        }
+        if (SubmoduleGit.Head(git, installed).Equals(commit, StringComparison.OrdinalIgnoreCase)) return;
+        if (SubmoduleGit.Changes(git, installed) is { Count: > 0 } changes) throw new IOException(SubmoduleSource.LocalChanges(installed, changes).Message);
+        SubmoduleGit.Checkout(git, installed, commit);
     }
+    private static void Write(string path, JsonObject json) => AtomicFile.Write(path, stream => JsonSerializer.Serialize(stream, json, Options));
     private static void Slug(string slug) { if (slug.Contains('/') || slug.Contains('\\')) throw new InvalidDataException("Invalid addon slug."); Inside("/", slug); }
+    private static void RecipeOwner(string slug) { if (slug.Contains('\\')) throw new InvalidDataException("Invalid addon slug."); Inside("/", slug); }
     private static string Inside(string root, string relative)
     {
         if (string.IsNullOrWhiteSpace(relative) || Path.IsPathRooted(relative) || relative.Split('/', '\\').Any(p => p is "" or "." or "..")) throw new InvalidDataException("Unsafe recovery path.");
@@ -170,7 +205,7 @@ internal static class UpdateRecovery
         {
             if ((File.GetAttributes(entry) & FileAttributes.ReparsePoint) != 0) continue;
             var to = Path.Combine(target, Path.GetFileName(entry));
-            if (Directory.Exists(entry)) Copy(entry, to); else File.Copy(entry, to, true);
+            if (Directory.Exists(entry)) Copy(entry, to); else AddonFiles.Overwrite(entry, to);
         }
     }
     private static bool HasVersion(string path, string version) => File.ReadLines(path).Any(line => line.Trim() == "version=\"" + version + "\"" || line.Trim() == "version = \"" + version + "\"");
@@ -188,6 +223,36 @@ internal static class UpdateRecovery
             File.SetAttributes(from, show ? FileAttributes.Normal : FileAttributes.Hidden);
             Directory.Move(from, to);
         }
+    }
+}
+
+/// <summary>
+/// The copy of the project files (<c>.csproj</c>, <c>.sln</c>, <c>nuget.config</c>, <c>project.godot</c>) a journal restores
+/// on rollback. Replacing it writes the new copy to <c>backup-project.new</c>, moves the old one to <c>.old</c> and the new
+/// one into place, and only then saves the journal. Used by both the applier and early recovery.
+/// </summary>
+internal static class ProjectBackup
+{
+    public const string Folder = "backup-project";
+
+    /// <summary>Whether a file in the project root is one of the project files the backup holds.</summary>
+    public static bool Includes(string fileName) =>
+        Path.GetExtension(fileName) is ".csproj" or ".sln" or ".slnx" || fileName.Equals("nuget.config", StringComparison.OrdinalIgnoreCase) || fileName == "project.godot";
+
+    /// <summary>
+    /// The folder to restore from and its files. When a replacement stopped between its two moves, the new copy is
+    /// complete (the old one is moved aside only after it) and is used; without the new copy, the old one is. The files
+    /// are those the folder holds: each copy is complete before it is moved into place, while the journal listing them is
+    /// saved only afterwards, so after an interruption it may still list the previous copy's (<paramref name="recorded"/>
+    /// is used only when the folder is missing).
+    /// </summary>
+    public static (string Directory, IReadOnlyList<string> Files) Find(string journalDirectory, IReadOnlyList<string> recorded)
+    {
+        var backup = Path.Combine(journalDirectory, Folder);
+        var directory = Directory.Exists(backup) || !Directory.Exists(backup + ".old") ? backup
+            : Directory.Exists(backup + ".new") ? backup + ".new" : backup + ".old";
+        if (!Directory.Exists(directory)) return (directory, recorded);
+        return (directory, Directory.GetFiles(directory).Select(f => Path.GetFileName(f)).Where(Includes).ToArray());
     }
 }
 #endif

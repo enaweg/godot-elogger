@@ -26,7 +26,7 @@ internal sealed class GodotProcessRunner : IProcessRunner
         try
         {
             // OS.Execute takes one argument per element and quotes those containing spaces itself.
-            var exitCode = OS.Execute(command, arguments, result, true, false);
+            var exitCode = OS.Execute(command, OperatingSystem.IsWindows() ? arguments : arguments.Select(QuotedForShell).ToArray(), result, true, false);
             return (exitCode, result.Select(e => e.ToString()).ToArray());
         }
         finally
@@ -34,38 +34,58 @@ internal sealed class GodotProcessRunner : IProcessRunner
             result.Dispose();
         }
     }
+
+    /// <summary>
+    /// An argument as OS.Execute must be given it outside Windows: when it reads the output, Godot joins the arguments in
+    /// double quotes and runs the line through /bin/sh (popen), which would expand <c>$</c> and backticks and end the
+    /// quote at <c>"</c>. A backslash makes those four characters literal inside double quotes.
+    /// </summary>
+    internal static string QuotedForShell(string argument) =>
+        argument.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("$", "\\$").Replace("`", "\\`");
 }
 
 internal abstract class ExecuteCliBase(ILogger? logger, bool enableDebugLogging, IProcessRunner? runner = null)
 {
     private readonly IProcessRunner _runner = runner ?? GodotProcessRunner.Instance;
 
+    /// <summary>The project directory, which the debug log shortens to <c>&lt;project&gt;</c>; null for commands without one.</summary>
+    protected virtual string? LoggedProjectRoot => null;
+
+    /// <summary>
+    /// Why the last command failed (<see cref="DotnetFailure.Describe"/>), or what refused it before it ran; null after a
+    /// command that succeeded. Recipe operations add it to their error, so it reaches the Needs attention dialog.
+    /// </summary>
+    public string? LastFailure { get; protected set; }
+
     /// <param name="args">One argument per element and without quotes, also for paths containing spaces.</param>
     protected (int, string[]) ExecuteCall(string cmd, string[] args)
     {
+        LastFailure = null;
         try
         {
             if (enableDebugLogging)
             {
-                var pathToSolution = Path.GetFullPath(ProjectSettings.GlobalizePath("res://"));
-                logger?.Log(
-                    $"Executing: {cmd} {string.Join(" ", args).Replace(pathToSolution, $"<project>{Path.DirectorySeparatorChar}")}");
+                var line = string.Join(" ", args);
+                if (LoggedProjectRoot is { } root)
+                    line = line.Replace(Path.TrimEndingDirectorySeparator(root) + Path.DirectorySeparatorChar, $"<project>{Path.DirectorySeparatorChar}");
+                logger?.Log($"Executing: {cmd} {line}");
             }
 
             var (exitVal, output) = _runner.Run(cmd, args);
             if (exitVal != 0)
             {
-                logger?.Error($"Command {cmd} failed with exit code {exitVal}: {string.Join("\n", output)}");
+                logger?.Error($"Command {cmd} {args.FirstOrDefault()} failed with exit code {exitVal}: {string.Join("\n", output)}");
+                LastFailure = DotnetFailure.Describe(exitVal, output) ?? $"{cmd} {args.FirstOrDefault()} failed with exit code {exitVal}.";
             }
 
             return (exitVal, output);
         }
         catch (Exception ex)
         {
-            logger?.Error(ex.Message);
+            logger?.Error($"Command {cmd} could not be run: {ex.GetType().Name}: {ex.Message}");
+            LastFailure = DotnetFailure.Describe(-1, [ex.Message]);
+            return (-1, [ex.Message]);
         }
-
-        return (-1, []);
     }
 }
 #endif

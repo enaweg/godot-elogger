@@ -27,11 +27,16 @@ internal static class PluginTypes
     public static Type? EPluginOf(string script) =>
         EPluginTypes.Value.FirstOrDefault(entry => entry.Scripts.Contains(script, StringComparer.Ordinal)).Type;
 
-    /// <summary>Whether an ePlugin script lies below <paramref name="directory"/> (a res:// path).</summary>
-    public static bool HasEPluginBelow(string directory)
+    /// <summary>
+    /// Whether an ePlugin script lies below the plugin directory <paramref name="directory"/> (a res:// path), outside the
+    /// folders of its sub-plugins: <paramref name="hasConfig"/> tells whether a res:// directory has a plugin.cfg.
+    /// </summary>
+    public static bool HasEPluginBelow(string directory, Func<string, bool> hasConfig)
     {
-        var prefix = directory.TrimEnd('/') + "/";
-        return EPluginTypes.Value.Any(entry => entry.Scripts.Any(path => path.StartsWith(prefix, StringComparison.Ordinal)));
+        directory = directory.TrimEnd('/');
+        var prefix = directory + "/";
+        return EPluginTypes.Value.Any(entry => entry.Scripts.Any(path => path.StartsWith(prefix, StringComparison.Ordinal) &&
+                                                                       EditorPluginExtensions.PluginDirectoryOf(path, hasConfig) == directory));
     }
 
     private static Type[] Load()
@@ -42,6 +47,10 @@ internal static class PluginTypes
         }
         catch (ReflectionTypeLoadException ex)
         {
+            // An ePlugin among the types that failed would be taken for a plain plugin: say why.
+            var cause = ex.LoaderExceptions.FirstOrDefault(e => e is not null)?.Message ?? ex.Message;
+            GD.PushWarning($"ePlugin could not load {ex.Types.Count(type => type is null)} types of the project assembly ({cause}). " +
+                           "Plugins defined by them are treated as plain plugins until the project builds and loads completely.");
             return ex.Types.Where(type => type is not null).Cast<Type>().ToArray();
         }
     }

@@ -7,44 +7,77 @@ namespace Enaweg.Plugin.Internal.Dotnet;
 
 internal abstract class DotnetCliBase : ExecuteCliBase, IDotnetCli, ICheckedDotnetCli
 {
-    /// <summary>The solution the CLI changes and builds.</summary>
+    /// <summary>
+    /// The solution the CLI changes and builds, in the solution directory: named after the assembly (<c>.sln</c>, else
+    /// <c>.slnx</c>), else its only <c>.sln</c>, else its only <c>.slnx</c>, else the <c>.sln</c> named after the assembly.
+    /// </summary>
     internal string SolutionPath { get; }
 
-    /// <summary>The main Godot project, next to the solution and named like it.</summary>
+    /// <summary>
+    /// The main Godot project, always in the project directory: named after the assembly, else the only project there,
+    /// else named like the solution.
+    /// </summary>
     internal string GodotProjectPath { get; }
 
     /// <summary>The Godot project directory, <c>res://</c>.</summary>
     internal string ProjectRoot { get; }
 
+    /// <summary>The project assembly's name, which Godot loads from <see cref="OutputDirectory"/>.</summary>
+    internal string AssemblyName { get; }
+
+    /// <summary>Where the editor loads the project assembly from.</summary>
+    internal string OutputDirectory => Path.Combine(ProjectRoot, ".godot", "mono", "temp", "bin", "Debug");
+
+    protected override string LoggedProjectRoot => ProjectRoot;
+
     protected readonly ILogger? Logger;
 
-    /// <param name="projectRoot">The Godot project directory; null for the open project. Tests use a scratch project.</param>
-    protected DotnetCliBase(ILogger? logger, bool enableDebugLogging, IProcessRunner? runner = null, string? projectRoot = null)
+    /// <param name="projectRoot">The Godot project directory, <see cref="IEditorHost.ProjectRoot"/>. Tests use a scratch project.</param>
+    /// <param name="assemblyName">The project's <see cref="IEditorHost.AssemblyName"/>; null or empty to use its only solution.</param>
+    /// <param name="solutionDirectory">The absolute <see cref="IEditorHost.SolutionDirectory"/>; null for the project directory.</param>
+    protected DotnetCliBase(ILogger? logger, bool enableDebugLogging, string projectRoot, string? assemblyName = null, IProcessRunner? runner = null,
+        string? solutionDirectory = null)
         : base(logger, enableDebugLogging, runner)
     {
         Logger = logger;
-        var pathToSolution = projectRoot ?? ProjectSettings.GlobalizePath("res://");
-        ProjectRoot = Path.GetFullPath(pathToSolution);
-        var assemblyName = projectRoot is null ? ProjectSettings.GetSetting("dotnet/project/assembly_name").AsString() : "";
-        var solutionName = $"{assemblyName}.sln";
-
-        var expectedSolutionPath = Path.GetFullPath(Path.Combine(pathToSolution, solutionName));
-        // Godot's assembly name need not match the solution name (the sample project uses
-        // "MyGame" and "My Game.sln", for example).
-        var solutions = Directory.GetFiles(pathToSolution, "*.sln");
-        if (solutions.Length == 0)
-        {
-            solutions = Directory.GetFiles(pathToSolution, "*.slnx");
-        }
-        SolutionPath = File.Exists(expectedSolutionPath) || solutions.Length != 1
-            ? expectedSolutionPath
-            : solutions[0];
-        GodotProjectPath = Path.ChangeExtension(SolutionPath, ".csproj");
+        ProjectRoot = Path.GetFullPath(projectRoot);
+        assemblyName ??= "";
+        SolutionPath = FindSolution(string.IsNullOrEmpty(solutionDirectory) ? ProjectRoot : Path.GetFullPath(solutionDirectory), assemblyName);
+        // Godot names the project after the assembly, also when the solution has another name, and keeps it in res://
+        // wherever the solution is.
+        var expectedProjectPath = Path.Combine(ProjectRoot, $"{assemblyName}.csproj");
+        GodotProjectPath = assemblyName.Length > 0 && File.Exists(expectedProjectPath) ? expectedProjectPath
+            : Directory.GetFiles(ProjectRoot, "*.csproj") is [var only] ? only
+            : Path.Combine(ProjectRoot, Path.GetFileNameWithoutExtension(SolutionPath) + ".csproj");
+        AssemblyName = string.IsNullOrEmpty(assemblyName) ? Path.GetFileNameWithoutExtension(GodotProjectPath) : assemblyName;
 
         if (enableDebugLogging)
         {
             logger?.Log($"Using {this.GetType().Name} for dotnet commands.");
         }
+    }
+
+    /// <summary>See <see cref="SolutionPath"/>.</summary>
+    private static string FindSolution(string directory, string assemblyName)
+    {
+        var expected = Path.Combine(directory, $"{assemblyName}.sln");
+        if (assemblyName.Length > 0)
+        {
+            // GodotTools creates <assembly>.sln; a project migrated to the XML format has <assembly>.slnx instead.
+            if (File.Exists(expected)) return expected;
+            if (File.Exists(Path.ChangeExtension(expected, ".slnx"))) return Path.ChangeExtension(expected, ".slnx");
+        }
+
+        if (!Directory.Exists(directory)) return expected;
+        // Godot's assembly name need not match the solution name (the sample project uses
+        // "MyGame" and "My Game.sln", for example).
+        var solutions = Directory.GetFiles(directory, "*.sln");
+        if (solutions.Length == 0)
+        {
+            solutions = Directory.GetFiles(directory, "*.slnx");
+        }
+
+        return solutions is [var only] ? only : expected;
     }
 
     /// <summary>
@@ -56,7 +89,7 @@ internal abstract class DotnetCliBase : ExecuteCliBase, IDotnetCli, ICheckedDotn
     {
         if (!ProjectReferences.IsValidPackageId(nugetName))
         {
-            Logger?.Error($"Cannot remove NuGet '{nugetName}': it is not a valid package id.");
+            Logger?.Error(LastFailure = $"Cannot remove NuGet '{nugetName}': it is not a valid package id.");
             return false;
         }
 
@@ -70,7 +103,7 @@ internal abstract class DotnetCliBase : ExecuteCliBase, IDotnetCli, ICheckedDotn
     {
         if (!ProjectReferences.IsValidProjectPath(projectReference))
         {
-            Logger?.Error($"Cannot remove project reference '{projectReference}': it is not a project file path.");
+            Logger?.Error(LastFailure = $"Cannot remove project reference '{projectReference}': it is not a project file path.");
             return false;
         }
 
@@ -84,13 +117,32 @@ internal abstract class DotnetCliBase : ExecuteCliBase, IDotnetCli, ICheckedDotn
     {
         if (!ProjectReferences.IsValidProjectPath(projectPath))
         {
-            Logger?.Error($"Cannot remove '{projectPath}' from the solution: it is not a project file path.");
+            Logger?.Error(LastFailure = $"Cannot remove '{projectPath}' from the solution: it is not a project file path.");
             return false;
         }
 
         if (ProjectReferences.SolutionContains(SolutionPath, ProjectFile(projectPath)) != false) return null;
         Logger?.Warn($"{Path.GetFileName(SolutionPath)} does not contain {projectPath}; nothing to remove.");
         return true;
+    }
+
+    /// <summary>
+    /// After <paramref name="projectPath"/> was added to the solution or referenced (<paramref name="reference"/>), makes
+    /// that entry build it as <c>Release</c> when the game is exported for release, unless the project optimizes
+    /// <c>ExportRelease</c> itself (<see cref="ReleaseConfiguration"/>). The project was added either way, so a failure
+    /// here is only a warning: the game still builds, with an unoptimized library.
+    /// </summary>
+    protected void MapExportRelease(string projectPath, bool reference)
+    {
+        var project = ProjectFile(projectPath);
+        var (exitCode, output) = Execute("msbuild", ReleaseConfiguration.ProbeArguments(project));
+        var mapped = exitCode == 0 && (ReleaseConfiguration.Optimizes(output) ||
+            (reference ? ReleaseConfiguration.MapReference(GodotProjectPath, project) : ReleaseConfiguration.MapSolution(SolutionPath, project)));
+        if (mapped) return;
+        // the project was added, so its addition did not fail
+        LastFailure = null;
+        Logger?.Warn($"Cannot make {(reference ? Path.GetFileName(GodotProjectPath) : Path.GetFileName(SolutionPath))} build {projectPath} " +
+                     $"as {ReleaseConfiguration.Release} in {ReleaseConfiguration.Export}; release exports will contain it unoptimized.");
     }
 
     /// <summary>
@@ -102,8 +154,27 @@ internal abstract class DotnetCliBase : ExecuteCliBase, IDotnetCli, ICheckedDotn
         Path.GetFullPath(Path.Combine(ProjectRoot,
             path.StartsWith("res://", System.StringComparison.Ordinal) ? path["res://".Length..] : path));
 
-    /// <summary>A NuGet source as the CLI takes it: <c>res://</c> and <c>user://</c> paths made absolute, URLs unchanged.</summary>
-    internal static string NugetSource(string source) => ProjectSettings.GlobalizePath(source);
+    /// <summary>
+    /// Runs a non-incremental build. It cleans the outputs first, so <see cref="BuildOutputGuard"/> puts the editor's
+    /// assembly back when the build fails.
+    /// </summary>
+    protected BuildOutcome BuildKeepingOutput(string[] args, bool keepNewAssembly = true) =>
+        BuildOutputGuard.Run(OutputDirectory, Path.Combine(ProjectRoot, ".godot", "eplugin", "build-output"), AssemblyName + ".dll", Logger, () =>
+        {
+            var (exitCode, output) = Execute(args[0], args[1..]);
+            return new BuildOutcome(exitCode, output);
+        }, keepNewAssembly);
+
+    /// <summary>
+    /// A NuGet source as the CLI takes it: URLs unchanged, <c>user://</c> made absolute, and local paths like
+    /// <see cref="ProjectFile"/>, relative to the project as <c>nuget.config</c> records them (<see cref="NugetConfigManager"/>).
+    /// Local paths have no trailing separator: quoted for the command line, a path ending in a backslash would escape its
+    /// closing quote on Windows.
+    /// </summary>
+    internal string NugetSource(string source) =>
+        source.StartsWith("user://", System.StringComparison.Ordinal) ? Path.TrimEndingDirectorySeparator(ProjectSettings.GlobalizePath(source))
+        : source.StartsWith("res://", System.StringComparison.Ordinal) || !source.Contains("://", System.StringComparison.Ordinal) ? Path.TrimEndingDirectorySeparator(ProjectFile(source))
+        : source;
 
     public abstract void RebuildSolution();
     public abstract void RunTests();
@@ -117,7 +188,8 @@ internal abstract class DotnetCliBase : ExecuteCliBase, IDotnetCli, ICheckedDotn
     public abstract void AddProjectReference(string projectReference);
     public abstract void RemoveProjectReference(string projectReference);
     public abstract (int, string[]) Execute(string command, string[] args);
-    public abstract BuildOutcome TryBuild();
+    public abstract BuildOutcome TryBuild(bool keepNewAssembly = true);
+    public abstract BuildOutcome TryBuildPluginsOnly(PluginsOnlyBuild build);
     public abstract bool TryRebuildSolution();
     public abstract bool TryAddProjectToSolution(string projectPath, string? virtualFolderName);
     public abstract bool TryRemoveProjectFromSolution(string projectPath);
