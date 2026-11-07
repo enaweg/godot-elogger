@@ -45,3 +45,112 @@ public class EPluginLoggerFactoryTest
             new RecordedLog("Second", LogLevel.Error, "from second"));
     }
 }
+
+#if TOOLS
+[TestSuite]
+public class EPluginLoggingSwitchTest
+{
+    [TestCase]
+    public void TakeOver_WhenEPluginIsNotRunning_SwitchesNothing()
+    {
+        var host = new FakeEPluginLoggingHost { IsValid = false };
+        var sut = new EPluginLoggingSwitch(host);
+        var factory = new EPluginLoggerFactory(new LogRecorder());
+
+        AssertBool(sut.TakeOver(factory)).IsFalse();
+        sut.HandBack(factory);
+
+        AssertThat(host.Switches).IsEmpty();
+    }
+
+    [TestCase]
+    public void TakeOver_SwitchesEPluginToTheFactory()
+    {
+        var host = new FakeEPluginLoggingHost();
+        var sut = new EPluginLoggingSwitch(host);
+        var factory = new EPluginLoggerFactory(new LogRecorder());
+
+        AssertBool(sut.TakeOver(factory)).IsTrue();
+
+        AssertObject(host.Current).IsSame(factory);
+    }
+
+    [TestCase]
+    public void HandBack_OfTheOnlyOwner_RestoresEPluginsDefaultLogging()
+    {
+        var host = new FakeEPluginLoggingHost();
+        var sut = new EPluginLoggingSwitch(host);
+        var factory = new EPluginLoggerFactory(new LogRecorder());
+        sut.TakeOver(factory);
+
+        sut.HandBack(factory);
+
+        AssertObject(host.Current).IsInstanceOf<Enaweg.Plugin.Logging.GenericLoggerFactory>();
+        AssertObject(host.Current!.CreateLogger("after")).IsInstanceOf<Enaweg.Plugin.Logging.GodotConsoleLogger>();
+    }
+
+    [TestCase]
+    public void HandBack_OfTheCurrentOwner_RestoresThePreviousOwner()
+    {
+        var host = new FakeEPluginLoggingHost();
+        var sut = new EPluginLoggingSwitch(host);
+        var first = new EPluginLoggerFactory(new LogRecorder());
+        var second = new EPluginLoggerFactory(new LogRecorder());
+        sut.TakeOver(first);
+        sut.TakeOver(second);
+
+        sut.HandBack(second);
+
+        AssertObject(host.Current).IsSame(first);
+    }
+
+    [TestCase]
+    public void HandBack_OfAnEarlierOwner_KeepsTheCurrentOne()
+    {
+        var host = new FakeEPluginLoggingHost();
+        var sut = new EPluginLoggingSwitch(host);
+        var first = new EPluginLoggerFactory(new LogRecorder());
+        var second = new EPluginLoggerFactory(new LogRecorder());
+        sut.TakeOver(first);
+        sut.TakeOver(second);
+
+        sut.HandBack(first);
+        AssertThat(host.Switches.Count).IsEqual(2);
+        AssertObject(host.Current).IsSame(second);
+
+        // With the earlier owner gone, the last one hands back to ePlugin's default rather than to a disposed provider.
+        sut.HandBack(second);
+        AssertObject(host.Current).IsInstanceOf<Enaweg.Plugin.Logging.GenericLoggerFactory>();
+    }
+
+    [TestCase]
+    public void HandBack_OfAFactoryWithoutAHold_SwitchesNothing()
+    {
+        var host = new FakeEPluginLoggingHost();
+        var sut = new EPluginLoggingSwitch(host);
+        var factory = new EPluginLoggerFactory(new LogRecorder());
+        sut.TakeOver(factory);
+        sut.HandBack(factory);
+
+        sut.HandBack(factory);
+        sut.HandBack(new EPluginLoggerFactory(new LogRecorder()));
+
+        AssertThat(host.Switches.Count).IsEqual(2);
+    }
+
+    [TestCase]
+    public void HandBack_AfterEPluginStopped_SwitchesNothing()
+    {
+        var host = new FakeEPluginLoggingHost();
+        var sut = new EPluginLoggingSwitch(host);
+        var factory = new EPluginLoggerFactory(new LogRecorder());
+        sut.TakeOver(factory);
+
+        // An assembly reload resets ePlugin, which then starts over with its default logging.
+        host.IsValid = false;
+        sut.HandBack(factory);
+
+        AssertThat(host.Switches.Count).IsEqual(1);
+    }
+}
+#endif

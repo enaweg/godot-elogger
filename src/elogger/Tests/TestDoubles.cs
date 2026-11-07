@@ -153,3 +153,19 @@ internal sealed partial class GodotOutputCapture : Godot.Logger
         lock (entries) entries.Add(new GodotOutput(text, true, (ErrorType)errorType));
     }
 }
+
+#if TOOLS
+/// <summary>Stands in for ePlugin's EGlobal: records every logger factory ePlugin was switched to.</summary>
+internal sealed class FakeEPluginLoggingHost : IEPluginLoggingHost
+{
+    readonly List<Enaweg.Plugin.Logging.ILoggerFactory> switches = new();
+
+    public bool IsValid { get; set; } = true;
+
+    public IReadOnlyList<Enaweg.Plugin.Logging.ILoggerFactory> Switches => switches;
+
+    public Enaweg.Plugin.Logging.ILoggerFactory? Current => switches.Count > 0 ? switches[^1] : null;
+
+    public void SwitchLogging(Enaweg.Plugin.Logging.ILoggerFactory loggerFactory) => switches.Add(loggerFactory);
+}
+#endif

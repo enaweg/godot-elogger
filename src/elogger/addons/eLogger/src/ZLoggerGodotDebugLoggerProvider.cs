@@ -5,10 +5,6 @@ using System.Diagnostics;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-#if TOOLS
-// ePlugin's internals are editor-only, so the namespace does not exist in an exported game build.
-using Enaweg.Plugin.Internal;
-#endif
 using Godot;
 using Godot.Collections;
 using Microsoft.Extensions.DependencyInjection;
@@ -215,6 +211,10 @@ public class ZLoggerGodotDebugLoggerProvider : ILoggerProvider, ISupportExternal
     readonly GodotOSLogger godotLogger;
     IExternalScopeProvider? scopeProvider;
     int isDisposed;
+#if TOOLS
+    readonly EPluginLoggingSwitch? ePluginLogging;
+    readonly EPluginLoggerFactory? ePluginLoggerFactory;
+#endif
 
     public ZLoggerGodotDebugLoggerProvider(ZLoggerGodotDebugOptions options) : this(options, null)
     {
@@ -231,12 +231,14 @@ public class ZLoggerGodotDebugLoggerProvider : ILoggerProvider, ISupportExternal
         if (options.EPluginIntegration)
         {
 #if TOOLS
-            // ePlugin only exists while the editor is running its plugins. In a game build (or when the game is run
-            // from the editor, which still compiles with TOOLS defined) EGlobal has no plugin context, so switching
-            // its logging is not possible and must be skipped instead of throwing.
-            if (EGlobal.Instance.IsValid())
+            // ePlugin only exists while the editor is running its plugins; in a game build the integration is
+            // compiled out, and in a game run from the editor TakeOver finds no ePlugin and switches nothing.
+            var ePluginFactory = new EPluginLoggerFactory(this);
+            var ePluginSwitch = EPluginLoggingSwitch.Global;
+            if (ePluginSwitch.TakeOver(ePluginFactory))
             {
-                EGlobal.Instance.SwitchLogging(new EPluginLoggerFactory(this));
+                ePluginLogging = ePluginSwitch;
+                ePluginLoggerFactory = ePluginFactory;
             }
 #endif
         }
@@ -316,6 +318,7 @@ public class ZLoggerGodotDebugLoggerProvider : ILoggerProvider, ISupportExternal
         }
         finally
         {
+            HandBackEPluginLogging();
             processor.DisposeAsync().AsTask().GetAwaiter().GetResult();
         }
     }
@@ -333,6 +336,7 @@ public class ZLoggerGodotDebugLoggerProvider : ILoggerProvider, ISupportExternal
         }
         finally
         {
+            HandBackEPluginLogging();
             await processor.DisposeAsync().ConfigureAwait(false);
         }
     }
@@ -352,6 +356,30 @@ public class ZLoggerGodotDebugLoggerProvider : ILoggerProvider, ISupportExternal
         {
             godotLogger.Dispose();
         }
+    }
+
+    /// <summary>
+    /// Returns ePlugin's logging to whoever had it before this provider took it over. Otherwise ePlugin keeps loggers
+    /// of a disposed provider, and every logger it creates afterwards throws <see cref="ObjectDisposedException" />.
+    /// </summary>
+    void HandBackEPluginLogging()
+    {
+#if TOOLS
+        if (ePluginLogging is null || ePluginLoggerFactory is null)
+        {
+            return;
+        }
+
+        try
+        {
+            ePluginLogging.HandBack(ePluginLoggerFactory);
+        }
+        catch (Exception e)
+        {
+            // Disposal must not fail because ePlugin could not switch its logging.
+            GD.PushWarning($"eLogger could not hand ePlugin's logging back: {e.Message}");
+        }
+#endif
     }
 
     public void SetScopeProvider(IExternalScopeProvider scopeProvider)
