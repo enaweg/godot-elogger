@@ -171,6 +171,106 @@ public class DiagnosticsHelperTest
         AssertThat(result).Contains("---> System.InvalidOperationException: second");
     }
 
+    [TestCase]
+    public void CleanupException_ShowsAsyncMethodsAsWrittenWithoutRuntimePlumbing()
+    {
+        var exception = Catch(() => RunOnThreadPool(OuterAsync));
+
+        var result = DiagnosticsHelper.CleanupException(exception);
+
+        // The runtime's own trace names these methods; the state machines they compile to are an implementation detail.
+        AssertThat(result).Contains($"{typeof(DiagnosticsHelperTest).FullName}.{nameof(InnerAsync)}(string message)");
+        AssertThat(result).Contains($"{typeof(DiagnosticsHelperTest).FullName}.{nameof(OuterAsync)}()");
+        AssertThat(result).NotContains("MoveNext");
+        AssertThat(result).NotContains("d__");
+        // [StackTraceHidden] frames that rethrow across the await.
+        AssertThat(result).NotContains("ExceptionDispatchInfo");
+        AssertThat(result).NotContains("TaskAwaiter");
+    }
+
+    [TestCase]
+    public void CleanupException_ShowsGenericAsyncMethodsAsWritten()
+    {
+        var exception = Catch(() => RunOnThreadPool(() => GenericAsync(1)));
+
+        var result = DiagnosticsHelper.CleanupException(exception);
+
+        AssertThat(result).Contains($"{nameof(GenericAsync)}<T>(T value)");
+        AssertThat(result).NotContains("MoveNext");
+    }
+
+    [TestCase]
+    public void CleanupException_ShowsIteratorsAsWritten()
+    {
+        var exception = Catch(() =>
+        {
+            foreach (var _ in Iterator())
+            {
+            }
+        });
+
+        var result = DiagnosticsHelper.CleanupException(exception);
+
+        AssertThat(result).Contains($"{typeof(DiagnosticsHelperTest).FullName}.{nameof(Iterator)}()");
+        AssertThat(result).NotContains("MoveNext");
+    }
+
+    [TestCase]
+    public void SelectTrace_KeepsTheCleanedUpTrace()
+    {
+        AssertThat(DiagnosticsHelper.SelectTrace("cleaned\n", 0, "   at raw")).IsEqual("cleaned\n");
+        // Some frames without metadata are normal under the JIT (native frames); they do not discard a good trace.
+        AssertThat(DiagnosticsHelper.SelectTrace("cleaned\n", 2, "   at raw")).IsEqual("cleaned\n");
+    }
+
+    [TestCase]
+    public void SelectTrace_WhenNoFrameHadMetadata_FallsBackToTheRuntimeTrace()
+    {
+        // Under NativeAOT every frame lacks method metadata; an empty trace would hide where the exception came from.
+        AssertThat(DiagnosticsHelper.SelectTrace("", 3, "   at Game.Player.Jump()"))
+            .IsEqual("   at Game.Player.Jump()" + Environment.NewLine);
+    }
+
+    [TestCase]
+    public void SelectTrace_WhenFramesWereOnlyFilteredOut_StaysEmpty()
+    {
+        // Every frame resolved but was logging plumbing: the raw trace would only bring that plumbing back.
+        AssertThat(DiagnosticsHelper.SelectTrace("", 0, "   at ZLogger.Something()")).IsEqual("");
+        AssertThat(DiagnosticsHelper.SelectTrace("", 3, null)).IsEqual("");
+    }
+
+    /// <summary>
+    /// Blocks on an async method without deadlocking. The test thread is Godot's main thread, whose
+    /// synchronization context only runs continuations while the main loop turns - which it does not while blocked.
+    /// </summary>
+    static void RunOnThreadPool(Func<Task> action) => Task.Run(action).GetAwaiter().GetResult();
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static async Task OuterAsync()
+    {
+        await InnerAsync("async boom");
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static async Task InnerAsync(string message)
+    {
+        await Task.Yield();
+        throw new InvalidOperationException(message);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static async Task<T> GenericAsync<T>(T value)
+    {
+        await Task.Yield();
+        throw new InvalidOperationException($"generic {value}");
+    }
+
+    static IEnumerable<int> Iterator()
+    {
+        yield return 1;
+        throw new InvalidOperationException("iterator boom");
+    }
+
     static Exception Catch(Action action)
     {
         try

@@ -55,3 +55,29 @@ jobs:
         run: |
           xvfb-run --auto-servernum --server-args="-screen 0 1024x768x24" \
             dotnet test eLogger.sln --configuration Debug --no-build --settings .runsettings --verbosity normal -m:1
+
+  # The dev project has the plugin enabled and only builds against the Godot version it pins. This builds what users
+  # actually get - the release package in a fresh project - against the oldest supported Godot and the pinned one.
+  consumer-build:
+    runs-on: ubuntu-latest
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: true
+      DOTNET_NOLOGO: true
+      # The oldest Godot eLogger supports (see CLAUDE.md): Godot.Logger was first exposed to scripting in 4.5.
+      MIN_GODOT_VERSION: 4.5.0
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Package the plugin like a release
+        run: bash .github/scripts/package-addon.sh out/eLogger.zip
+
+      - name: Build a consumer project from the package
+        run: |
+          pinned="$(sed -n 's|.*Godot\.NET\.Sdk/\([^"]*\)".*|\1|p' src/elogger/eLogger.csproj)"
+          bash .github/scripts/check-consumer-build.sh out/eLogger.zip "$MIN_GODOT_VERSION" "$pinned"
