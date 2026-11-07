@@ -53,6 +53,19 @@ public partial class GodotDebugLogProcessorTest
     }
 
     [TestCase]
+    public void Post_WithAFreedGodotObjectContext_LogsWithoutThrowing()
+    {
+        var marker = Guid.NewGuid().ToString("N");
+        var context = new Node();
+        context.Free();
+
+        var output = Capture(new ZLoggerGodotDebugOptions(),
+            logger => logger.ZLogInformation($"freed-context-{marker}", context), marker);
+
+        AssertThat(output.Select(o => o.Text)).ContainsExactly($"(#freed) freed-context-{marker}");
+    }
+
+    [TestCase]
     public void Post_WithANonGodotContext_DoesNotPrefix()
     {
         var marker = Guid.NewGuid().ToString("N");

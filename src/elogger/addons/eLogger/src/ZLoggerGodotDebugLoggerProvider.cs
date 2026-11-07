@@ -92,7 +92,12 @@ public class GodotDebugLogProcessor : IAsyncLogProcessor
 
             if (context is not null)
             {
-                msg = $"(#{context.GetInstanceId()}) {msg}";
+                // A context can be logged after its native object was freed, e.g. from an async continuation after
+                // QueueFree. GetInstanceId would throw ObjectDisposedException then, and the logging pipeline would
+                // re-throw it into the code that logged.
+                msg = GodotObject.IsInstanceValid(context)
+                    ? $"(#{context.GetInstanceId()}) {msg}"
+                    : $"(#freed) {msg}";
             }
 
             using var _ = GodotLogGuard.Enter();
