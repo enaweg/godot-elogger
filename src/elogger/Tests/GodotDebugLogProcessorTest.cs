@@ -109,6 +109,24 @@ public partial class GodotDebugLogProcessorTest
     }
 
     [TestCase]
+    public void Post_WithPrettyStacktraceAndAJsonFormatter_PrintsTheExceptionOnce()
+    {
+        var marker = Guid.NewGuid().ToString("N");
+        var exception = ThrowAndCatch();
+        var options = new ZLoggerGodotDebugOptions { PrettyStacktrace = true };
+        options.UseJsonFormatter();
+
+        var output = Capture(options, logger => logger.ZLogError(exception, $"failed-{marker}"), marker);
+
+        // The JSON formatter writes the exception into its own structure; the cleaned-up trace must not follow it.
+        var text = output.Single().Text;
+        AssertThat(text).StartsWith("{");
+        AssertThat(Regex.Matches(text, "boom").Count).IsEqual(1);
+        AssertThat(text).NotContains($"void {typeof(GodotDebugLogProcessorTest).FullName}.{nameof(ThrowingFrame)}()");
+        AssertThat(text).NotContains("---");
+    }
+
+    [TestCase]
     public void Post_WithoutPrettyStacktrace_LeavesTheFormatterTraceAlone()
     {
         var marker = Guid.NewGuid().ToString("N");

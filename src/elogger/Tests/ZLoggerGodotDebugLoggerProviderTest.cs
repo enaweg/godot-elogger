@@ -168,6 +168,36 @@ public partial class ZLoggerGodotDebugLoggerProviderTest
     }
 
     [TestCase]
+    public void Constructor_WhenEPluginFailsToSwitch_StillLogsAndLeavesEPluginOnItsDefault()
+    {
+        var marker = Guid.NewGuid().ToString("N");
+        var host = new FakeEPluginLoggingHost { FailNextSwitch = true };
+        var sink = new MemorySink();
+        WithEPluginLoggingSwitch(new EPluginLoggingSwitch(host), () =>
+        {
+            // The integration is optional: a failure in ePlugin must not fail the application's logging setup.
+            var factory = LoggerFactory.Create(logging =>
+            {
+                logging.SetMinimumLevel(LogLevel.Trace);
+                logging.AddZLoggerGodotDebug();
+                logging.AddZLoggerLogProcessor(sink);
+            });
+            AssertObject(host.Current).IsInstanceOf<Enaweg.Plugin.Logging.GenericLoggerFactory>();
+
+            // The engine logger is installed regardless.
+            factory.CreateLogger("warmup");
+            GD.PushError($"engine-{marker}");
+            var switches = host.Switches.Count;
+            factory.Dispose();
+
+            // Nothing was taken over, so disposing does not switch ePlugin again.
+            AssertThat(host.Switches.Count).IsEqual(switches);
+        });
+
+        AssertThat(sink.Entries.Any(e => e.Message.Contains($"engine-{marker}"))).IsTrue();
+    }
+
+    [TestCase]
     public void DisposeAsync_WithEPluginIntegration_HandsEPluginLoggingBack()
     {
         var host = new FakeEPluginLoggingHost();

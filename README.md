@@ -136,7 +136,7 @@ Keep the factory alive for as long as you log. Disposing it also removes the pro
 
 | Option | Default | Effect |
 |---|---|---|
-| `PrettyStacktrace` | `true` | Prints logged exceptions with cleaned-up stack traces that link to `res://` paths. It replaces the plain-text formatter's exception output, so a custom exception formatter set through `UsePlainTextFormatter` only applies when this is `false`. |
+| `PrettyStacktrace` | `true` | Prints logged exceptions with cleaned-up stack traces that link to `res://` paths. It replaces the plain-text formatter's exception output, so a custom exception formatter set through `UsePlainTextFormatter` only applies when this is `false`. Other formatters, such as the JSON one, keep their own exception output. |
 | `EPluginIntegration` | `true` | Routes ePlugin's logging through ZLogger while the provider is alive (editor only). |
 | `EngineCategoryPrefix` | `"Godot"` | Root of the categories that intercepted engine messages are logged under (see below). |
 

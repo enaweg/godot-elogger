@@ -21,7 +21,8 @@ public sealed class ZLoggerGodotDebugOptions : ZLoggerOptions
     /// <summary>
     /// Print logged exceptions with cleaned-up stack traces that link to <c>res://</c> paths. The plain-text
     /// formatter's exception output is replaced by this, so a custom exception formatter set through
-    /// <c>UsePlainTextFormatter</c> only applies when this is <c>false</c>.
+    /// <c>UsePlainTextFormatter</c> only applies when this is <c>false</c>. Other formatters, such as the JSON one,
+    /// keep their own exception output, so this has no effect with them.
     /// </summary>
     public bool PrettyStacktrace { get; set; } = true;
     public bool EPluginIntegration { get; set; } = true;
@@ -63,20 +64,22 @@ public class GodotDebugLogProcessor : IAsyncLogProcessor
 {
     [ThreadStatic] static ArrayBufferWriter<byte>? bufferWriter;
 
-    readonly ZLoggerGodotDebugOptions options;
     readonly IZLoggerFormatter formatter;
+    readonly bool prettyStacktrace;
 
     public GodotDebugLogProcessor(ZLoggerGodotDebugOptions options)
     {
-        this.options = options;
         formatter = options.CreateFormatter();
 
         // The plain-text formatter appends exception.ToString(), so the trace would be printed twice: raw by the
         // formatter, then cleaned up by Post. Leave the exception to Post. Every CreateFormatter call returns a new
         // instance, so this does not affect other processors built from the same options.
+        // Other formatters, the JSON one for instance, write the exception into their own structure. It cannot be
+        // taken out of there, and appending the cleaned-up trace as well would print it twice, so it is left alone.
         if (options.PrettyStacktrace && formatter is PlainTextZLoggerFormatter plainText)
         {
             plainText.SetExceptionFormatter(static (_, _) => { });
+            prettyStacktrace = true;
         }
     }
 
@@ -92,7 +95,7 @@ public class GodotDebugLogProcessor : IAsyncLogProcessor
             var context = log.LogInfo.Context as GodotObject;
             var msg = FormatToString(log, formatter);
 
-            if (log.LogInfo.Exception is { } exception && options.PrettyStacktrace)
+            if (log.LogInfo.Exception is { } exception && prettyStacktrace)
             {
                 msg =
                     $"{msg}{Environment.NewLine}{DiagnosticsHelper.CleanupException(exception)}{Environment.NewLine}---";
@@ -249,7 +252,6 @@ public class ZLoggerGodotDebugLoggerProvider : ILoggerProvider, ISupportExternal
 
         var loggerAccessor = CreateEngineLoggerAccessor(serviceProvider);
         godotLogger = new GodotOSLogger(loggerAccessor, options.EngineCategoryPrefix);
-        OS.AddLogger(godotLogger);
 
         if (options.EPluginIntegration)
         {
@@ -260,12 +262,36 @@ public class ZLoggerGodotDebugLoggerProvider : ILoggerProvider, ISupportExternal
             // honour its filters rather than only being printed by this provider.
             var ePluginFactory = new EPluginLoggerFactory(loggerAccessor);
             var ePluginSwitch = EPluginLoggingSwitch.Global;
-            if (ePluginSwitch.TakeOver(ePluginFactory))
+            try
             {
-                ePluginLogging = ePluginSwitch;
-                ePluginLoggerFactory = ePluginFactory;
+                if (ePluginSwitch.TakeOver(ePluginFactory))
+                {
+                    ePluginLogging = ePluginSwitch;
+                    ePluginLoggerFactory = ePluginFactory;
+                }
+            }
+            catch (Exception e)
+            {
+                // The integration is optional; failing to switch ePlugin's logging must not take the application's
+                // logging down with it. This runs before the engine logger is installed, so the warning is not fed
+                // back into a logger factory that is still being built.
+                GD.PushWarning($"eLogger could not take over ePlugin's logging: {e.Message}");
             }
 #endif
+        }
+
+        // Installed last: once Godot holds the engine logger only Dispose removes it again, so nothing that can still
+        // fail the constructor may come after this. Should installing fail, nobody gets a provider to dispose, so
+        // give ePlugin's logging back here.
+        try
+        {
+            OS.AddLogger(godotLogger);
+        }
+        catch
+        {
+            HandBackEPluginLogging();
+            godotLogger.Dispose();
+            throw;
         }
     }
 

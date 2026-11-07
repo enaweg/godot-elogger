@@ -67,7 +67,8 @@ internal sealed class EPluginLoggingSwitch
 
     /// <summary>
     /// Switches ePlugin's logging to <paramref name="factory" />. Returns <c>false</c>, and switches nothing, when
-    /// ePlugin is not running.
+    /// ePlugin is not running. When ePlugin fails to switch, it is returned to its previous logging and the exception
+    /// is rethrown.
     /// </summary>
     internal bool TakeOver(ILoggerFactory factory)
     {
@@ -80,7 +81,26 @@ internal sealed class EPluginLoggingSwitch
                 return false;
             }
 
-            host.SwitchLogging(factory);
+            try
+            {
+                host.SwitchLogging(factory);
+            }
+            catch
+            {
+                // ePlugin hands out its loggers one by one, so a failure can leave some of them on the new factory.
+                // That factory is never handed back, so return ePlugin to whoever had it before.
+                try
+                {
+                    host.SwitchLogging(owners.Count > 0 ? owners[^1] : CreateDefaultFactory());
+                }
+                catch
+                {
+                    // Report the original failure, not this one.
+                }
+
+                throw;
+            }
+
             owners.Add(factory);
             return true;
         }

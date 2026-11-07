@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System;
 using System.Collections.Generic;
@@ -58,7 +59,8 @@ public static class DiagnosticsHelper
         }
 
         sb.Append(exception.GetType().FullName).Append(": ").AppendLine(exception.Message);
-        sb.Append(CleanupStackTrace(new StackTrace(exception, true)));
+        var cleaned = CleanupStackTrace(new StackTrace(exception, true), out var unresolvedFrames);
+        sb.Append(SelectTrace(cleaned, unresolvedFrames, exception.StackTrace));
 
         // An AggregateException's InnerException is only the first of its inner exceptions.
         if (exception is AggregateException aggregate)
@@ -74,19 +76,51 @@ public static class DiagnosticsHelper
         }
     }
 
-    public static string CleanupStackTrace(StackTrace stackTrace)
+    /// <summary>
+    /// Picks the trace to print for an exception. Under NativeAOT, which Godot's iOS export uses, stack frames carry
+    /// no method metadata, so the cleaned-up trace comes out empty although the runtime's own trace still names every
+    /// frame. Print that one then rather than an exception without any trace.
+    /// </summary>
+    internal static string SelectTrace(string cleaned, int unresolvedFrames, string? raw)
     {
+        if (cleaned.Length > 0 || unresolvedFrames == 0 || string.IsNullOrEmpty(raw))
+        {
+            return cleaned;
+        }
+
+        return raw + System.Environment.NewLine;
+    }
+
+    public static string CleanupStackTrace(StackTrace stackTrace) => CleanupStackTrace(stackTrace, out _);
+
+    static string CleanupStackTrace(StackTrace stackTrace, out int unresolvedFrames)
+    {
+        unresolvedFrames = 0;
         var sb = new StringBuilder();
         for (var i = 0; i < stackTrace.FrameCount; i++)
         {
             var sf = stackTrace.GetFrame(i);
 
-            // Frames without resolvable metadata (native, inlined or trimmed) have no method or no declaring
-            // type. They carry nothing worth printing and must not throw - this runs inside the log pipeline.
+            // Frames without resolvable metadata (native, inlined, trimmed or NativeAOT) have no method or no
+            // declaring type. They carry nothing worth printing and must not throw - this runs inside the log
+            // pipeline.
             if (sf is null) continue;
 
             var mb = sf.GetMethod();
-            if (mb?.DeclaringType is null) continue;
+            if (mb?.DeclaringType is null)
+            {
+                unresolvedFrames++;
+                continue;
+            }
+
+            // Runtime plumbing such as ExceptionDispatchInfo.Throw and TaskAwaiter is marked [StackTraceHidden];
+            // the runtime's own trace leaves it out, so this one does too.
+            if (IsHidden(mb)) continue;
+
+            // An async or iterator method runs as MoveNext of a compiler-generated state machine. Show the method
+            // that was written, as the runtime's own trace does, instead of "<Method>d__3.MoveNext()".
+            mb = ResolveStateMachineMethod(mb);
+            if (mb.DeclaringType is null) continue;
 
             if (IgnoreLine(mb)) continue;
 
@@ -147,6 +181,42 @@ public static class DiagnosticsHelper
         }
 
         return sb.ToString();
+    }
+
+    static bool IsHidden(MethodBase method) =>
+        method.IsDefined(typeof(StackTraceHiddenAttribute), false) ||
+        (method.DeclaringType?.IsDefined(typeof(StackTraceHiddenAttribute), false) ?? false);
+
+    /// <summary>
+    /// Maps the <c>MoveNext</c> of a compiler-generated async or iterator state machine onto the method it was
+    /// generated for, which carries a <see cref="StateMachineAttribute" /> naming the state machine type.
+    /// </summary>
+    static MethodBase ResolveStateMachineMethod(MethodBase method)
+    {
+        var stateMachine = method.DeclaringType;
+        var owner = stateMachine?.DeclaringType;
+        if (stateMachine is null || owner is null || method.Name != "MoveNext" ||
+            !stateMachine.IsDefined(typeof(CompilerGeneratedAttribute), false))
+        {
+            return method;
+        }
+
+        // The attribute names the generic definition of a state machine that belongs to a generic method or type.
+        var definition = stateMachine.IsGenericType ? stateMachine.GetGenericTypeDefinition() : stateMachine;
+        const BindingFlags all = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static |
+                                 BindingFlags.Instance | BindingFlags.DeclaredOnly;
+        foreach (var candidate in owner.GetMethods(all))
+        {
+            foreach (var attribute in candidate.GetCustomAttributes<StateMachineAttribute>(false))
+            {
+                if (attribute.StateMachineType == stateMachine || attribute.StateMachineType == definition)
+                {
+                    return candidate;
+                }
+            }
+        }
+
+        return method;
     }
 
     static string BeautifyType(Type t, bool shortName)

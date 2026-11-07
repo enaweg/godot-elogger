@@ -1,3 +1,4 @@
+using System;
 using GdUnit4;
 using Microsoft.Extensions.Logging;
 using static GdUnit4.Assertions;
@@ -87,6 +88,37 @@ public class EPluginLoggingSwitchTest
         AssertBool(sut.TakeOver(factory)).IsTrue();
 
         AssertObject(host.Current).IsSame(factory);
+    }
+
+    [TestCase]
+    public void TakeOver_WhenEPluginFailsToSwitch_RestoresThePreviousOwnerAndRethrows()
+    {
+        var host = new FakeEPluginLoggingHost();
+        var sut = new EPluginLoggingSwitch(host);
+        var first = new EPluginLoggerFactory(new LogRecorder());
+        var failing = new EPluginLoggerFactory(new LogRecorder());
+        sut.TakeOver(first);
+        host.FailNextSwitch = true;
+
+        AssertThrown(() => sut.TakeOver(failing)).IsInstanceOf<InvalidOperationException>();
+
+        // ePlugin may already have handed some loggers to the failing factory; it must end up on the previous owner.
+        AssertObject(host.Current).IsSame(first);
+        // The failing factory never got a hold, so handing it back changes nothing.
+        sut.HandBack(failing);
+        AssertObject(host.Current).IsSame(first);
+    }
+
+    [TestCase]
+    public void TakeOver_WhenEPluginFailsToSwitchWithoutAPreviousOwner_RestoresEPluginsDefaultLogging()
+    {
+        var host = new FakeEPluginLoggingHost { FailNextSwitch = true };
+        var sut = new EPluginLoggingSwitch(host);
+
+        AssertThrown(() => sut.TakeOver(new EPluginLoggerFactory(new LogRecorder())))
+            .IsInstanceOf<InvalidOperationException>();
+
+        AssertObject(host.Current).IsInstanceOf<Enaweg.Plugin.Logging.GenericLoggerFactory>();
     }
 
     [TestCase]
