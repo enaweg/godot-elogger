@@ -46,7 +46,7 @@ public sealed class GodotLogProcessor : IAsyncLogProcessor
                     GD.Print($"WARN: {msg}");
                     break;
                 case LogLevel.Error:
-                    GD.PrintErr(msg);
+                    GD.PrintErr($"ERROR: {msg}");
                     break;
                 case LogLevel.Critical:
                     GD.PrintErr($"CRITICAL: {msg}");

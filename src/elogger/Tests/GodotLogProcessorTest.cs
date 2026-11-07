@@ -31,7 +31,7 @@ public partial class GodotLogProcessorTest
             new GodotOutput($"DEBUG: debug-{marker}", false, null),
             new GodotOutput($"info-{marker}", false, null),
             new GodotOutput($"WARN: warn-{marker}", false, null),
-            new GodotOutput($"error-{marker}", true, null),
+            new GodotOutput($"ERROR: error-{marker}", true, null),
             new GodotOutput($"CRITICAL: critical-{marker}", true, null));
     }
 
