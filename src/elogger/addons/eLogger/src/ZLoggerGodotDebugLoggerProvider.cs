@@ -194,6 +194,11 @@ internal sealed partial class GodotOSLogger : Godot.Logger
             return;
         }
 
+        // Godot hands over printed text with its line break attached. Sinks end every entry themselves, so keeping it
+        // would add a blank line after each mirrored GD.Print. Reassigned rather than copied into a new local so the
+        // structured parameter keeps its "message" name. TrimEnd returns the same instance when there is nothing to trim.
+        message = message.TrimEnd('\r', '\n');
+
         var logger = loggerAccessor(outputCategory);
         if (error)
         {

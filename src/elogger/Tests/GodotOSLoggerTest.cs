@@ -164,6 +164,23 @@ public partial class GodotOSLoggerTest
     }
 
     [TestCase]
+    public void LogMessage_StripsTheTrailingLineBreak()
+    {
+        var recorder = new LogRecorder();
+        var sut = new GodotOSLogger(recorder.CreateLogger);
+
+        // Godot passes printed text with its line break attached.
+        sut._LogMessage("printed\n", false);
+        sut._LogMessage("printed on windows\r\n", true);
+        sut._LogMessage("first line\nsecond line\n", false);
+
+        AssertThat(recorder.Entries).ContainsExactly(
+            new RecordedLog("Godot.Output", LogLevel.Information, "printed"),
+            new RecordedLog("Godot.Output", LogLevel.Error, "printed on windows"),
+            new RecordedLog("Godot.Output", LogLevel.Information, "first line\nsecond line"));
+    }
+
+    [TestCase]
     public void Categories_HonourTheConfiguredPrefix()
     {
         var recorder = new LogRecorder();
