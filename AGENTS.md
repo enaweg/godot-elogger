@@ -76,7 +76,7 @@ ePlugin has its own lightweight logging interfaces (`Enaweg.Plugin.Logging.ILogg
 
 ### eLogger plugin (`addons/eLogger/`)
 
-`ELoggerPlugin.CreateRecipe` registers the `ZLogger` NuGet package at the floating version `ELoggerPlugin.ZLoggerVersion` (`2.6.*`, the newest 2.6.x patch release) and `ZString` at its latest version, and exposes the `.src` directory, which contains the runtime source files. Because the plugin is enabled in this development project, those packages (`ZLogger` 2.6.*, resolving to 2.6.2, and `ZString` 2.6.0) appear in `eLogger.csproj`, and the directory exists as `src/` on disk. To move to a new ZLogger minor or major release, change `ZLoggerVersion`, the `ZLogger` version in `.github/scripts/check-consumer-build.sh` and the one in `eLogger.csproj` together.
+`ELoggerPlugin.CreateRecipe` registers the `ZLogger` and `ZString` NuGet packages at the floating versions `ELoggerPlugin.ZLoggerVersion` and `ZStringVersion` (both `2.6.*`, the newest 2.6.x patch release) and exposes the `.src` directory, which contains the runtime source files. Because the plugin is enabled in this development project, those packages (both `2.6.*`, resolving to `ZLogger` 2.6.2 and `ZString` 2.6.0) appear in `eLogger.csproj`, and the directory exists as `src/` on disk. To move either package to a new minor or major release, change its constant, its version in `.github/scripts/check-consumer-build.sh` and the one in `eLogger.csproj` together.
 
 Two `IAsyncLogProcessor` implementations handle ZLogger-to-Godot routing:
 
