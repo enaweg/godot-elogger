@@ -13,6 +13,6 @@
     <PackageReference Include="gdUnit4.test.adapter" Version="3.2.0" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.11.0" />
     <PackageReference Include="ZLogger" Version="2.6.*" />
-    <PackageReference Include="ZString" Version="2.6.0" />
+    <PackageReference Include="ZString" Version="2.6.*" />
   </ItemGroup>
 </Project>
