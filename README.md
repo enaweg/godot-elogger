@@ -13,7 +13,7 @@
 ![Dotnet 8](https://img.shields.io/badge/8-02020?logo=dotnet&logoSize=auto&logoColor=purple&color=darkgreen&labelColor=E0E0E0)
 ![Dotnet 10](https://img.shields.io/badge/10-02020?logo=dotnet&logoSize=auto&logoColor=purple&color=darkgreen&labelColor=E0E0E0)
 
-![ZLogger 2.5](https://img.shields.io/badge/ZLogger-v2.6-202020?color=darkgreen&labelColor=202020)
+![ZLogger 2.6](https://img.shields.io/badge/ZLogger-v2.6-202020?color=darkgreen&labelColor=202020)
 
 **NOTE**: This project is experimental and still a work in progress.
 
@@ -63,9 +63,13 @@ The current CI-tested configuration uses:
 
 + [Godot 4.7.2 .NET](https://godotengine.org/download/archive/4.7.2-stable/)
 + [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)
++ [ZLogger 2.6.2](https://www.nuget.org/packages/ZLogger/2.6.2) and [ZString 2.6.0](https://www.nuget.org/packages/ZString/2.6.0)
 
 The project targets `net8.0`. Godot **4.5** is the minimum supported version: engine message interception
 subclasses `Godot.Logger`, which was first exposed to scripting in 4.5.
+
+Enabling the plugin adds the latest `ZLogger` and `ZString` releases from NuGet, so a project can end up on a
+newer version than the one listed here.
 
 ## Installation
 
