@@ -61,7 +61,7 @@ internal sealed partial class EGlobal
         }
 
         // Handled once the new assembly is loaded: work started now would run on the old code.
-        if (AssemblyReload.IsPending)
+        if (_host.IsAssemblyReloadPending)
         {
             return false;
         }
@@ -72,7 +72,7 @@ internal sealed partial class EGlobal
 
         // Updates disable and enable plain plugins while they replace them, and reconcile recipes themselves.
         if (_recipeUpdateJournal is not null || _updateRefreshSuppression > 0 ||
-            _updateJournals?.Read().Any(j => j.IsActive) == true)
+            IsUpdateActive)
         {
             return true;
         }
@@ -154,7 +154,7 @@ internal sealed partial class EGlobal
         catch (Exception ex)
         {
             _ePluginContext?.Logger.Error($"Installing the optional recipes that {name} satisfies failed: {ex.Message}");
-            FailTransition("optional_recipe_failed");
+            FailTransition(AttemptReasons.OptionalRecipeFailed);
             return;
         }
 
@@ -170,43 +170,42 @@ internal sealed partial class EGlobal
         _contexts.RemoveAll(c => c.Slug == slug && c.Plugin is null);
         // resumed, a plugin still waiting for another dependency would enable this one again
         FailPluginsWaitingFor(slug);
-        var dependants = _contexts.Where(c => c.Plugin is not null && c.State == EEditorPluginState.Activated &&
-                                              RecipeOf(c.Slug)?.PluginDependencies.Any(d => d.Slug == slug) == true)
-            .ToArray();
-        if (dependants.Length == 0 && !PluginsWithOptionalDependencyOn(slug).Any())
+        // The plugin is gone already, so nothing is refused for a dependant whose recipe cannot be read (it is logged); only
+        // disabling an ePlugin itself can still be stopped by one.
+        var dependants = ActivatedDependantsOf(slug, out _);
+        if (dependants.Count == 0 && !PluginsWithOptionalDependencyOn(slug).Any())
         {
             return;
         }
 
         var name = PluginName(slug);
         using var progress = ActivationProgress.Begin($"Deactivating what needs {name}...");
-        _transitionHold++;
-        try
+        using (_coordinator.Hold())
         {
-            // An uninstall resolves its optional recipes against the editor, where this plugin is gone already. That is also
-            // the uninstall of a plugin disabled further down, because it requires a dependant.
-            foreach (var plugin in PluginsWithOptionalDependencyOn(slug).Where(p => p.AppliedOptionalDependencies is null).ToArray())
+            try
             {
-                plugin.AppliedOptionalDependencies = ResolveOptionalRecipes(plugin, plugin.Builder.PluginRecipe, assumeEnabledSlug: slug);
-            }
+                // An uninstall resolves its optional recipes against the editor, where this plugin is gone already. That is
+                // also the uninstall of a plugin disabled further down, because it requires a dependant.
+                foreach (var plugin in PluginsWithOptionalDependencyOn(slug).Where(p => p.AppliedOptionalDependencies is null).ToArray())
+                {
+                    plugin.AppliedOptionalDependencies = ResolveOptionalRecipes(plugin, plugin.Builder.PluginRecipe, assumeEnabledSlug: slug);
+                }
 
-            foreach (var dependant in dependants.Where(d => _host.IsPluginEnabled(d.Slug)))
+                foreach (var dependant in dependants.Where(d => _host.IsPluginEnabled(d.Slug)))
+                {
+                    dependant.Logger?.Warn($"Disabling {dependant.Name}: it requires {name}, which was disabled.");
+                    _host.SetPluginEnabled(dependant.Slug, false);
+                }
+
+                UninstallOptionalDependenciesOn(slug);
+            }
+            catch (Exception ex)
             {
-                dependant.Logger?.Warn($"Disabling {dependant.Name}: it requires {name}, which was disabled.");
-                _host.SetPluginEnabled(dependant.Slug, false);
+                // still held: the failure ends the transition before anything could finish it
+                _ePluginContext?.Logger.Error($"Removing what needs {name} failed: {ex.Message}");
+                FailTransition(AttemptReasons.OptionalRecipeFailed);
+                return;
             }
-
-            UninstallOptionalDependenciesOn(slug);
-        }
-        catch (Exception ex)
-        {
-            _ePluginContext?.Logger.Error($"Removing what needs {name} failed: {ex.Message}");
-            FailTransition("optional_recipe_failed");
-            return;
-        }
-        finally
-        {
-            _transitionHold--;
         }
 
         FinishPlainPluginTransition();
@@ -231,11 +230,15 @@ internal sealed partial class EGlobal
         }
     }
 
+    /// <summary>
+    /// Completes the transition the toggle started, if any: without one, <see cref="FinishTransition"/> would report the
+    /// last transition's outcome and refresh the editor for nothing.
+    /// </summary>
     private void FinishPlainPluginTransition()
     {
-        if (_transition is not null && FinishTransition())
+        if (_transition is not null)
         {
-            RefreshEditor(rebuild: false);
+            CompleteTransition();
         }
     }
 }

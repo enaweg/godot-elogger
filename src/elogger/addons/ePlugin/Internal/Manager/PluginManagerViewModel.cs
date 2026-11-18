@@ -1,6 +1,7 @@
 #if TOOLS
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Linq;
 using System.Text;
@@ -86,7 +87,7 @@ internal sealed class PluginManagerViewModel
             }
             if (SemVer.TryParse(candidate.InstalledVersion, out var old) && SemVer.TryParse(candidate.NewVersion, out var next) && next.Major != old.Major)
                 messages.Add(new("R14", FindingSeverity.Warning, "Major version change: your project code may need changes."));
-            if (candidate.Slug == "ePlugin") messages.Add(new("restart", FindingSeverity.Info, "The editor will restart after this update."));
+            if (candidate.Slug == Framework.Slug) messages.Add(new("restart", FindingSeverity.Info, "The editor will restart after this update."));
             var failure = cache?.LastFailure(candidate);
             Updates.Add(new(candidate, messages, failure));
         }
@@ -109,6 +110,48 @@ internal sealed class PluginManagerViewModel
     public static string? UpdateState(PluginRow row) =>
         row.Update is { } update ? $"Update available: {update.Candidate.InstalledVersion} → {update.Candidate.NewVersion}"
         : row.IsUpdatable ? "Updatable" : null;
+
+    /// <summary>The tooltip of a plugin's check box in the list.</summary>
+    public static string EnabledTooltip(PluginRow row) =>
+        row.Plugin.Kind == PluginKind.GDExtensionAddon ? "Godot always loads a GDExtension without plugin.cfg; there is nothing to enable or disable."
+        : !row.CanToggle ? "The plugin folder or its plugin.cfg is missing."
+        : row.Plugin.Enabled ? "Enabled. Uncheck to disable the plugin." : "Disabled. Check to enable the plugin.";
+
+    /// <summary>The tooltip of a plugin's name in the list: its name and folder, its type and its update state.</summary>
+    /// <param name="directory">The plugin's folder, see <see cref="IEditorHost.PluginDirectory"/>.</param>
+    public static string NameTooltip(PluginRow row, string directory) =>
+        $"{ListName(row.Plugin)} ({directory})\n{PluginKinds.Name(row.Plugin.Kind)}" + (UpdateState(row) is { } state ? "\n" + state : "");
+
+    /// <summary>The Version column of a plugin: its installed version, followed by the version an update installs.</summary>
+    public static string VersionColumnText(PluginRow row) =>
+        row.Update is { } update ? $"{VersionText(row.Plugin)} → {update.Candidate.NewVersion}" : VersionText(row.Plugin);
+
+    /// <summary>The tooltip of the Version column: what the update does, else the plugin's status.</summary>
+    public static string VersionColumnTooltip(PluginRow row) =>
+        row.Update is { } update ? update.HasError ? "This update cannot be installed, see details." : "Update installs this update."
+        : StatusText(row.Plugin);
+
+    /// <summary>The status line's note while the manager waits for the editor to load an assembly a build replaced.</summary>
+    public const string ReloadNotice = "Waiting for the editor to load the rebuilt C# code...";
+
+    /// <summary>The status line's note when the editor did not load the assembly a plugin operation of the manager built.</summary>
+    public const string ReloadFailedNotice = "The editor has not finished loading the rebuilt C# code. Restart the editor to continue.";
+
+    /// <summary>
+    /// The manager's status line: the outcome of the last operation, else when updates are checked (<see cref="CheckSchedule"/>)
+    /// and whether local directories are indexed; with the number of updates available and whether the manager waits for a
+    /// reload.
+    /// </summary>
+    /// <param name="notice">The outcome of the last operation; null without one, and for an error, which the error area shows.</param>
+    /// <param name="awaitingReload">A plugin operation's build has not been loaded yet, see <see cref="PluginOperationGate.IsAwaitingReload"/>.</param>
+    public static string StatusLine(string? notice, int updates, string schedule, bool indexing, bool reloadPending, bool awaitingReload)
+    {
+        // The line keeps counting the updates, also those a check found while it failed for other plugins.
+        var available = updates == 0 ? null : $"{updates} update{(updates == 1 ? "" : "s")} available";
+        return (notice is not null ? notice + (available is null ? "" : " · " + available)
+                   : (available is null ? "" : available + " · ") + schedule + (indexing ? " · Indexing local directories..." : "")) +
+               (reloadPending ? " · " + ReloadNotice : awaitingReload ? " · " + ReloadFailedNotice : "");
+    }
 
     /// <summary>The published versions plus the installed one, newest first.</summary>
     /// <param name="kind">
@@ -177,9 +220,55 @@ internal sealed class PluginManagerViewModel
         return null;
     }
 
+    /// <summary>
+    /// Whether the version choice offers a choice: it needs two versions. A single one is the installed version, or, for
+    /// an add-on of unknown version, the one version found, which is preselected either way.
+    /// </summary>
+    public static bool CanChooseVersion(IReadOnlyCollection<VersionOption> options) => options.Count >= 2;
+
+    /// <summary>The tooltip of the button that installs the selected version: why it cannot, else what it installs.</summary>
+    public static string VersionInstallTooltip(PluginRow row, VersionOption option) =>
+        VersionChangeBlocked(row, option) ?? (option.IsReinstall
+            ? $"Install version {option.Version} of {row.Plugin.Name} again, replacing its files."
+            : $"Install version {option.Version} of {row.Plugin.Name}.");
+
+    /// <summary>
+    /// The confirmation before a version is installed: what replaces what, what a downgrade risks, and what happens when
+    /// the project does not build with it.
+    /// </summary>
+    /// <param name="buildFailurePolicy">The plugin's <c>eplugin/updates/on_build_failure</c>: ask, keep, or rollback.</param>
+    public static string VersionConfirmText(PluginRow row, VersionOption option, BuildFailurePolicy buildFailurePolicy) =>
+        (option.IsReinstall
+            ? $"Reinstall {row.Plugin.Name} {row.Plugin.Version}?\n\n{VersionSource(option)}. Its files replace the installed ones: " +
+              "this brings in new commits of a git branch and undoes changes made to the plugin's folder in the project.\n\n"
+            : option.ReplacesUnknown
+            ? $"Install {row.Plugin.Name} {option.Version}?\n\n{VersionSource(option)}. Its files replace the installed ones, " +
+              "whose version ePlugin does not know because it did not install them. From then on, updates are found.\n\n"
+            : $"Replace {row.Plugin.Name} {row.Plugin.Version} with version {option.Version}?\n\n") +
+        (option.IsDowngrade
+            ? "Use this to undo an update that broke the project. Project code or saved data that already relies on the newer version may stop working. "
+            : "") +
+        "Open scenes are saved first; files and project references are backed up" + buildFailurePolicy switch
+        {
+            BuildFailurePolicy.Ask => ". If the project does not build with it, you choose whether to keep it and fix the errors yourself or to restore the previous version.",
+            BuildFailurePolicy.Keep => ". If the project does not build with it, it is kept so you can fix the errors (project setting eplugin/updates/on_build_failure).",
+            _ => " and restored if installation fails.",
+        };
+
     /// <summary>The installed version as the manager shows it: "unknown" for a GDExtension add-on ePlugin did not install.</summary>
     public static string VersionText(PluginInfo plugin) =>
         plugin.Version.Length == 0 && plugin.Kind == PluginKind.GDExtensionAddon ? "unknown" : plugin.Version;
+
+    /// <summary>
+    /// The manager's window title, followed by the project's name (else its folder's), so editors of similar projects
+    /// side by side can be told apart.
+    /// </summary>
+    public static string WindowTitle(string? projectName, string projectRoot)
+    {
+        var name = projectName?.Trim();
+        if (string.IsNullOrEmpty(name)) name = System.IO.Path.GetFileName(System.IO.Path.TrimEndingDirectorySeparator(projectRoot));
+        return string.IsNullOrEmpty(name) ? "ePlugin Manager" : $"ePlugin Manager - {name}";
+    }
 
     /// <summary>The heading of the details: the plugin's name followed by its installed version.</summary>
     public static string DetailsTitle(PluginInfo plugin) =>
@@ -345,7 +434,9 @@ internal sealed class PluginManagerViewModel
     /// is escaped.
     /// </summary>
     /// <param name="kept">The plugin's update kept with build errors, see <see cref="KeptUpdateSection"/>.</param>
-    public static string Describe(PluginRow row, LicenseInfo? license = null, WelcomeEntry? welcome = null, UpdateJournal? kept = null)
+    /// <param name="recipe">The recipe of an ePlugin, see <see cref="RecipeSection"/>.</param>
+    public static string Describe(PluginRow row, LicenseInfo? license = null, WelcomeEntry? welcome = null, UpdateJournal? kept = null,
+        EEditorPluginRecipe? recipe = null)
     {
         var plugin = row.Plugin; var text = new StringBuilder();
         void Line(string label, string? value) { if (!string.IsNullOrWhiteSpace(value)) text.Append(CultureInfo.CurrentCulture, $"[b]{label}:[/b] {Escape(value)}\n"); }
@@ -356,7 +447,7 @@ internal sealed class PluginManagerViewModel
         }
         if (row.NeedsAttention) text.Append(CultureInfo.CurrentCulture, $"[color={TextColors.Error}]This plugin needs attention.[/color] [url={AttentionMeta}]See what happened and what you can do[/url]\n\n");
         if (!string.IsNullOrWhiteSpace(plugin.Description)) text.Append(Escape(plugin.Description.Trim())).Append("\n\n");
-        Line("Type", PluginCatalog.KindName(plugin.Kind));
+        Line("Type", PluginKinds.Name(plugin.Kind));
         Line("Status", StatusText(plugin));
         Line("Author", plugin.Author);
         // ePlugin's built-in list fills in what plugin.cfg does not set
@@ -385,7 +476,7 @@ internal sealed class PluginManagerViewModel
             else if (update.Candidate.Package is SubmodulePackageRef tag) Line("Tag", $"{tag.Tag} ({SubmoduleSource.Short(tag.Commit)})");
             else Link("Update site", update.Candidate.SourceUrl);
             if (update.Candidate.ReleaseUrl is not null) Link("Release", update.Candidate.ReleaseUrl);
-            foreach (var finding in update.Findings) text.Append(CultureInfo.CurrentCulture, $"[color={Color(finding.Severity)}]{finding.Severity}:[/color] {Escape(finding.Message)}\n");
+            foreach (var finding in update.Findings) text.Append(CultureInfo.CurrentCulture, $"[color={TextColors.For(finding.Severity)}]{finding.Severity}:[/color] {Escape(finding.Message)}\n");
             if (update.Failed is { } failed) text.Append(CultureInfo.CurrentCulture, $"[color={TextColors.Error}]Previously failed {failed.Utc:u}:[/color] {Escape(failed.Reason)}\n");
         }
         else if (submodule) { /* RepositoryLine named its remote. */ }
@@ -416,33 +507,49 @@ internal sealed class PluginManagerViewModel
         }
         if (plugin.LocalPackages > 0 && !submodule) Line("Local packages", plugin.LocalPackages.ToString(CultureInfo.CurrentCulture));
 
-        if (plugin.Recipe is { } recipe)
-        {
-            var hard = recipe.PluginDependencies.Where(d => d.Slug != "ePlugin").Select(d => d.Slug + Version(d.Version)).ToArray();
-            List("Plugin dependencies", hard);
-            List("Optional dependencies", recipe.OptionalPluginDependencies.Select(d => d.Slug + Version(d.Version)));
-            List("NuGet packages", recipe.Nugets.Select(n => n.Name + Version(n.Version)));
-            List("Projects", recipe.Projects.Select(p => p.Path));
-            List("Autoloads", recipe.Autoloads.Select(a => a.Name));
-            List("Managed directories", recipe.Directories);
-        }
+        if (recipe is not null) text.Append(RecipeSection(recipe, plugin));
         return text.ToString().TrimEnd();
-
-        void List(string title, IEnumerable<string> items)
-        {
-            var values = items.ToArray();
-            if (values.Length == 0) return;
-            text.Append(CultureInfo.CurrentCulture, $"\n[b]{title}[/b]\n");
-            foreach (var value in values) text.Append("• ").Append(Escape(value)).Append('\n');
-        }
     }
-    private static string Version(string? version) => string.IsNullOrWhiteSpace(version) ? "" : " " + version;
-    private static string Color(FindingSeverity severity) => severity switch
+
+    /// <summary>
+    /// What an ePlugin's recipe installs, one short line per kind: required and optional plugins (with what an optional
+    /// dependency adds while that plugin is enabled), NuGet packages, projects, autoloads and managed directories.
+    /// </summary>
+    public static string RecipeSection(EEditorPluginRecipe recipe, PluginInfo plugin)
     {
-        FindingSeverity.Error => TextColors.Error, FindingSeverity.Warning => TextColors.Warning, _ => TextColors.Info
-    };
+        var state = plugin.State == EEditorPluginState.Activated ? " (installed)" : !plugin.Enabled ? " (installed when enabled)" : "";
+        var text = new StringBuilder("\n[b]Recipe[/b]").Append(state).Append('\n');
+        var empty = true;
+        void Line(string label, IEnumerable<string> items)
+        {
+            var values = string.Join(", ", items);
+            if (values.Length == 0) return;
+            text.Append(CultureInfo.CurrentCulture, $"{label}: {Escape(values)}\n");
+            empty = false;
+        }
+        Line("Requires", recipe.PluginDependencies.Where(d => d.Slug != Framework.Slug).Select(d => d.Slug + Version(d.Version)));
+        Line("Optional", recipe.OptionalPluginDependencies.Select(d => d.Slug + Version(d.Version) +
+            (RecipeResources(d.Recipe) is { Length: > 0 } adds ? $" (adds {adds})" : "")));
+        Line("NuGet", recipe.Nugets.Select(Nuget));
+        Line("Projects", recipe.Projects.Select(Project));
+        Line("Autoloads", recipe.Autoloads.Select(a => a.Name));
+        Line("Directories", recipe.Directories);
+        if (empty) text.Append("Installs nothing.\n");
+        return text.ToString();
+    }
+
+    /// <summary>The resources of a nested recipe in one phrase, e.g. "NuGet A 1.0, autoload B"; empty without any.</summary>
+    private static string RecipeResources(EEditorPluginRecipe recipe) => string.Join("; ", new[]
+    {
+        Phrase("NuGet", recipe.Nugets.Select(Nuget)), Phrase("project", recipe.Projects.Select(Project)),
+        Phrase("autoload", recipe.Autoloads.Select(a => a.Name)), Phrase("directory", recipe.Directories)
+    }.Where(p => p.Length > 0));
+
+    private static string Phrase(string label, IEnumerable<string> items) => string.Join(", ", items) is { Length: > 0 } values ? $"{label} {values}" : "";
+    private static string Nuget(EEditorPluginRecipe.Nuget nuget) => nuget.Name + Version(nuget.Version);
+    private static string Project(EEditorPluginRecipe.Project project) => project.Path + (project.Reference ? " (referenced)" : " (solution only)");
+    private static string Version(string? version) => string.IsNullOrWhiteSpace(version) ? "" : " " + version;
     internal static string Escape(string value) => value.Replace("[", "[lb]");
-    /// <summary>An http(s) URL without credentials that can be embedded in a BBCode url tag and opened in a browser.</summary>
     /// <summary>
     /// Scales the <c>[font_size]</c> of a plugin's BBCode page by the editor scale. Its sizes are pixels written for 100%,
     /// while the default font of the dialog is scaled, so a heading would otherwise be smaller than the text at 200%.
@@ -451,7 +558,11 @@ internal sealed class PluginManagerViewModel
         : FontSize.Replace(bbcode, m => $"[font_size={Math.Max(1, (int)Math.Round(int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture) * scale))}]");
     private static readonly Regex FontSize = new(@"\[font_size=(\d{1,4})\]", RegexOptions.CultureInvariant);
 
-    internal static bool IsWebUrl(string? value) =>
+    /// <summary>
+    /// An http(s) URL without credentials that can be embedded in a BBCode url tag and opened in a browser; the manager
+    /// opens no other links, from its details or its Release button.
+    /// </summary>
+    internal static bool IsWebUrl([NotNullWhen(true)] string? value) =>
         Uri.TryCreate(value, UriKind.Absolute, out var uri) && uri.Scheme is "https" or "http" && uri.UserInfo.Length == 0 &&
         value!.IndexOfAny(['[', ']']) < 0;
 }

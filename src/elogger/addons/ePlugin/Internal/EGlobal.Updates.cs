@@ -1,6 +1,5 @@
 #if TOOLS
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -32,14 +31,14 @@ internal sealed partial class EGlobal
 
     private void InitializeUpdates(EPluginPlugin plugin)
     {
-        _updateCache ??= new UpdateStateStore(Path.Combine(UpdateProjectRoot, ".godot/eplugin/update-state.json"), m => _ePluginContext?.Logger?.Warn(m));
+        _updateCache ??= new UpdateStateStore(UpdatePaths.CacheOf(UpdateProjectRoot), m => _ePluginContext?.Logger?.Warn(m));
         _updateCache.Load();
         // The update applier changes the cache on the editor thread, so checks write their results there too.
         _updateService = new UpdateService(new UpdateSourceFactory(log: m => Post(() => _ePluginContext?.Logger?.Warn(m))), new SystemClock(), _updateCache, OnEditorThread);
         InitializeUpdateSites();
         InitializeLocalSources();
         _remoteUpdates = UpdateScheduler.CurrentCached(_updateCache.State, CollectUpdateTargets());
-        var check = _updateJournals?.Read().Any(j => j.IsActive) != true;
+        var check = !IsUpdateActive;
         var engine = Engine.GetSingleton("Engine");
         if (engine.HasMeta("eplugin_update_check_ran")) check = false;
         else if (check) engine.SetMeta("eplugin_update_check_ran", true);
@@ -140,7 +139,7 @@ internal sealed partial class EGlobal
         catch (Exception ex)
         {
             await OnEditorThread(() => _ePluginContext?.Logger.Warn($"Update check failed: {ex.Message}"), ct).ConfigureAwait(false);
-            return new([], [new("ePlugin", ex.Message)], DateTimeOffset.UtcNow);
+            return new([], [new(Framework.Slug, ex.Message)], DateTimeOffset.UtcNow);
         }
     }
 
@@ -158,41 +157,6 @@ internal sealed partial class EGlobal
         var versions = await Task.Run(() => service.ListVersionsAsync(target, new(), ct), ct);
         await OnEditorThread(() => { if (_updateCache is not null) _remoteUpdates = UpdateScheduler.CurrentCached(_updateCache.State, CollectUpdateTargets()); }, ct);
         return versions;
-    }
-
-    internal static Task OnEditorThread(Action action, CancellationToken ct)
-    {
-        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var registration = ct.Register(() => completion.TrySetCanceled(ct));
-        Post(() =>
-        {
-            try { if (!ct.IsCancellationRequested) { action(); completion.TrySetResult(); } }
-            catch (Exception ex) { completion.TrySetException(ex); }
-            finally { registration.Dispose(); }
-        });
-        return completion.Task;
-    }
-
-    // Work for the editor thread, run by EPluginPlugin._Process. Unlike Callable.CallDeferred it hands Godot no delegate:
-    // a C# assembly reload discards this queue with the rest of the old assembly's static state, so nothing queued by
-    // old code runs after the reload, and background threads never call into Godot.
-    private static readonly ConcurrentQueue<Action> Posted = new();
-
-    /// <summary>Runs <paramref name="action"/> on the editor thread in a later frame. Callable from any thread.</summary>
-    internal static void Post(Action action) => Posted.Enqueue(action);
-
-    /// <summary>Drops the work posted so far, as an assembly reload does.</summary>
-    internal static void DiscardPosted() => Posted.Clear();
-
-    /// <summary>Runs the work posted so far; called once per frame on the editor thread.</summary>
-    internal static void RunPosted()
-    {
-        // Work posted while running waits for the next frame, so a chain of posts cannot keep the frame from ending.
-        for (var count = Posted.Count; count > 0 && Posted.TryDequeue(out var action); count--)
-        {
-            try { action(); }
-            catch (Exception ex) { GD.PushError($"ePlugin editor-thread work failed: {ex}"); }
-        }
     }
 
     private void PrintUpdates(UpdateCheckResult result, bool manual)
@@ -269,7 +233,7 @@ internal sealed class UpdateCheckGate
             {
                 // A waiting manual check reports the failure too, rather than throwing it a second time.
                 End(mine.Task);
-                mine.SetResult(new([], [new("ePlugin", ex.Message)], DateTimeOffset.UtcNow));
+                mine.SetResult(new([], [new(Framework.Slug, ex.Message)], DateTimeOffset.UtcNow));
                 throw;
             }
         }

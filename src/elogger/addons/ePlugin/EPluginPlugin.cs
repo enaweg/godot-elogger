@@ -266,7 +266,7 @@ public sealed partial class EPluginPlugin : EditorPlugin, IEPlugin, ISerializati
             Icon = EditorIcons.Manager(_managerStatus)
         };
         if (_managerButton.Icon is null) _managerButton.Text = "ePlugin";
-        _managerSignals.Connect(_managerButton, Control.SignalName.ThemeChanged, Callable.From(() => CallDeferred(nameof(RefreshManagerIcon))));
+        _managerSignals.Connect(_managerButton, Control.SignalName.ThemeChanged, Callable.From(() => CallDeferred(MethodName.RefreshManagerIcon)));
         _managerSignals.Connect(_managerButton, BaseButton.SignalName.Pressed, Callable.From(OpenManager));
         var settingsChanged = new Callable(this, MethodName.OnSettingsChanged);
         if (!ProjectSettings.Singleton.IsConnected(ProjectSettings.SignalName.SettingsChanged, settingsChanged))
@@ -378,7 +378,6 @@ public sealed partial class EPluginPlugin : EditorPlugin, IEPlugin, ISerializati
                       $".NET {System.Environment.Version}, {System.Runtime.InteropServices.RuntimeInformation.OSDescription}\n" +
                       $"Failed starts in a row: {_startupFailures}\n\n{error}";
         _startupDialog = StartupFailureDialog.Create(error.Message, details, () => _nextInitializeAttempt = DateTime.MinValue);
-        EditorInterface.Singleton.GetBaseControl().AddChild(_startupDialog);
         _startupDialog.Open();
     }
 
@@ -387,7 +386,6 @@ public sealed partial class EPluginPlugin : EditorPlugin, IEPlugin, ISerializati
         try
         {
             _failureDialog = UpdateFailureDialog.Create(journal, keep => EGlobal.Instance.DecideUpdate(journal, keep));
-            EditorInterface.Singleton.GetBaseControl().AddChild(_failureDialog);
             _failureDialog.Open();
         }
         catch (Exception ex) { Logger.Error($"Cannot show update decision: {ex.Message}"); EGlobal.Instance.DecideUpdate(journal, false); }
@@ -402,9 +400,9 @@ public sealed partial class EPluginPlugin : EditorPlugin, IEPlugin, ISerializati
             _updateOwner.RestartRequested -= RememberManagerForRestart;
         }
         ReleaseReopenProgress();
-        foreach (var dialog in new Window?[] { _managerDialog, _failureDialog, _licenseDialog, _welcomeDialog, _cleanupDialog })
+        foreach (var dialog in new Window?[] { _managerDialog, _failureDialog, _licenseDialog, _welcomeDialog, _cleanupDialog, _startupDialog })
             if (dialog is not null) EditorWindows.Release(dialog);
-        _managerDialog = null; _failureDialog = null; _licenseDialog = null; _welcomeDialog = null; _cleanupDialog = null;
+        _managerDialog = null; _failureDialog = null; _licenseDialog = null; _welcomeDialog = null; _cleanupDialog = null; _startupDialog = null;
     }
 
     private static void RestoreEarlyUpdateSettings()

@@ -37,7 +37,15 @@ internal sealed partial class EGlobal
         get => _updateHost ??= new GodotUpdateHost(this);
         set => _updateHost = value;
     }
-    internal void InitializeUpdateJournals() => _updateJournals = new(Path.Combine(UpdateProjectRoot, ".godot/eplugin/updates"), message => _ePluginContext?.Logger.Error(message));
+    internal void InitializeUpdateJournals() => _updateJournals = new(UpdatePaths.TransactionsOf(UpdateProjectRoot), message => _ePluginContext?.Logger.Error(message));
+
+    /// <summary>
+    /// Whether an update journal on disk is active, i.e. an update is being applied or awaits its recovery. Reads the
+    /// journals. False while they are not initialized; a caller that must not start then checks
+    /// <see cref="_updateJournals"/> for null itself.
+    /// </summary>
+    private bool IsUpdateActive => _updateJournals?.Read().Any(j => j.IsActive) == true;
+
     private UpdateApplier Applier()
     {
         if (_stateStore is null || _updateCache is null) throw new InvalidOperationException("Update system is not initialized.");
@@ -50,7 +58,7 @@ internal sealed partial class EGlobal
     /// </summary>
     internal async Task<(IReadOnlyList<ValidatedPackage> Packages, IReadOnlyList<RefusedPackage> Refused, string Directory)> StageUpdatesAsync(IReadOnlyList<UpdateCandidate> candidates, IProgress<double>? progress, CancellationToken ct, bool allowDowngrade = false, bool allowReinstall = false)
     {
-        if (_fetchingUpdate || _updateJournals is null || _updateJournals.Read().Any(j => j.IsActive)) throw new InvalidOperationException("An update is already in progress.");
+        if (_fetchingUpdate || _updateJournals is null || IsUpdateActive) throw new InvalidOperationException("An update is already in progress.");
         _fetchingUpdate = true;
         var targets = CollectUpdateTargets();
         var directory = _updateJournals.NewDirectory();
@@ -131,11 +139,11 @@ internal sealed partial class EGlobal
         if (UpdateApplyBlocker is { } reason) throw new InvalidOperationException(reason + " Addon files were not changed.");
     }
 
-    /// <summary>What a build failure does to an update of this plugin started from its details: ask, keep or rollback.</summary>
-    internal string DetailsBuildFailurePolicy(string slug)
+    /// <summary>What a build failure does to an update of this plugin started from its details.</summary>
+    internal BuildFailurePolicy DetailsBuildFailurePolicy(string slug)
     {
         var host = UpdateHost;
-        return UpdateFailureDecision.Choose(slug == "ePlugin", UpdateFailureDecision.Policy(host.BuildFailurePolicy, false, true), host.UiAvailable);
+        return UpdateFailureDecision.Choose(slug == Framework.Slug, UpdateFailureDecision.Policy(host.BuildFailurePolicy, false, true), host.UiAvailable);
     }
 
     private static string GroupNames(IReadOnlyList<ValidatedPackage> group) => string.Join(", ", group.Select(p => p.Candidate.PluginName));
@@ -144,7 +152,7 @@ internal sealed partial class EGlobal
     {
         var dependencies = _contexts.Where(c => c.Plugin is not null && c.State == EEditorPluginState.Activated).DistinctBy(c => c.Slug)
             .ToDictionary(c => c.Slug, c => (IReadOnlyCollection<string>)Snapshot(c).PluginDependencies.Select(d => d.Slug).ToArray(), StringComparer.Ordinal);
-        return UpdateGroups.Plan(packages.Select(p => p.Candidate.Slug).ToArray(), dependencies, "ePlugin")
+        return UpdateGroups.Plan(packages.Select(p => p.Candidate.Slug).ToArray(), dependencies, Framework.Slug)
             .Select(group => (IReadOnlyList<ValidatedPackage>)group.Select(slug => packages.First(p => p.Candidate.Slug == slug)).ToArray()).ToArray();
     }
 
@@ -198,7 +206,7 @@ internal sealed partial class EGlobal
         if (result == UpdateOutcome.AwaitingDecision)
         {
             var journal = UpdateJournal.Load(directory);
-            Post(() =>
+            PostForInstance(() =>
             {
                 if (UpdateDecisionNeeded is null) Applier().Rollback(journal, "No build-failure dialog is available.");
                 else UpdateDecisionNeeded(journal);
@@ -225,7 +233,7 @@ internal sealed partial class EGlobal
     {
         if (_updateJournals is null || _stateStore is null) return;
         // Cache is needed by recovery before the first scheduled check.
-        _updateCache ??= new UpdateStateStore(Path.Combine(UpdateProjectRoot, ".godot/eplugin/update-state.json"), m => _ePluginContext?.Logger?.Warn(m));
+        _updateCache ??= new UpdateStateStore(UpdatePaths.CacheOf(UpdateProjectRoot), m => _ePluginContext?.Logger?.Warn(m));
         _updateCache.Load();
         // A batch is staged within minutes, so a folder this old without a journal is no longer in use.
         foreach (var folder in _updateJournals.AbandonedStaging(DateTime.UtcNow - TimeSpan.FromHours(6)))
@@ -272,7 +280,7 @@ internal sealed partial class EGlobal
             return;
         }
         var attempts = _stateStore.LocalAttempts.Where(a => a.AttemptId == journal.AttemptId).ToArray();
-        if (attempts.Any(a => a.Reason.StartsWith("update_", StringComparison.Ordinal)))
+        if (attempts.Any(a => a.Reason.StartsWith(AttemptReasons.UpdatePrefix, StringComparison.Ordinal)))
         {
             _ePluginContext?.Logger.Warn($"Update needs manual recovery: {journal.Directory}. Use Retry under Needs attention in the ePlugin Manager.");
             return;
@@ -327,7 +335,7 @@ internal sealed partial class EGlobal
     internal UpdateJournal? KeptUpdate(string slug)
     {
         if (_stateStore is null || _updateJournals is null) return null;
-        var attempts = _stateStore.LocalAttempts.Where(a => a.Reason == "update_kept_build_failed").Select(a => a.AttemptId).ToHashSet();
+        var attempts = _stateStore.LocalAttempts.Where(a => a.Reason == AttemptReasons.UpdateKeptBuildFailed).Select(a => a.AttemptId).ToHashSet();
         return _updateJournals.Read().LastOrDefault(j => j.State == UpdatePhase.CommittedWithErrors && attempts.Contains(j.AttemptId) && j.Plugins.Any(p => p.Slug == slug));
     }
 
@@ -366,7 +374,7 @@ internal sealed partial class EGlobal
         private static readonly StringName GetOpenSceneRoots = "get_open_scene_roots";
         private const int MaxClosedScenes = 1000;
         public bool UiAvailable => global.LicenseUiAvailable;
-        public string BuildFailurePolicy => ProjectSettings.GetSetting("eplugin/updates/on_build_failure", "ask").AsString();
+        public BuildFailurePolicy BuildFailurePolicy => UpdateFailureDecision.Parse(ProjectSettings.GetSetting("eplugin/updates/on_build_failure", "ask").AsString());
         public bool RestartAlways => ProjectSettings.GetSetting("eplugin/updates/restart_policy", "auto").AsString() == "always";
         // A GDExtension add-on is never enabled, but Godot always runs it.
         public bool IsEnabled(string slug) => global._host.IsPluginEnabled(slug) || global.IsExtensionAddon(slug);
@@ -383,7 +391,7 @@ internal sealed partial class EGlobal
             var findings = global.UpdatePreflightFindings(packages.Select(p => p.Candidate with { NewVersion = UpdateApplier.PackageVersion(p) }).ToArray());
             if (findings.Any(f => f.Severity == FindingSeverity.Error)) throw new InvalidOperationException(string.Join("; ", findings.Where(f => f.Severity == FindingSeverity.Error).Select(f => f.Message)));
             foreach (var warning in findings.Where(f => f.Severity == FindingSeverity.Warning)) Log(warning.Message);
-            if (global._toCheckEnable.Count > 0 || global._toCheckDisable.Count > 0) throw new InvalidOperationException("Finish plugin transitions before updating.");
+            if (global._coordinator.HasWaiting) throw new InvalidOperationException("Finish plugin transitions before updating.");
             if (packages.Any(p => p.ContainsCSharp) && global.GetOrCreateContext(global._ePluginContext!).Cli is not ICheckedDotnetCli)
                 throw new InvalidOperationException("A working dotnet CLI is required for C# updates.");
         }
@@ -453,10 +461,10 @@ internal sealed partial class EGlobal
         public bool Verify(UpdatePluginJournal plugin)
         {
             // An add-on has no version in its files; what is there to check is that it is still a GDExtension or became a plugin.
-            if (PluginKinds.Workflow(plugin) is GDExtensionAddonWorkflow)
+            if (!PluginKinds.Workflow(plugin).HasPluginConfig)
                 return global.IsExtensionAddon(plugin.Slug) || File.Exists(Path.Combine(ProjectSettings.GlobalizePath(global._host.PluginDirectory(plugin.Slug)), "plugin.cfg"));
             var metadata = EditorPluginExtensions.ReadMetadata($"{global._host.PluginDirectory(plugin.Slug)}/plugin.cfg");
-            return (plugin.Slug != "ePlugin" || global.IsValid()) && IsEnabled(plugin.Slug) && SemVer.Same(metadata?.Version, plugin.NewVersion) &&
+            return (plugin.Slug != Framework.Slug || global.IsValid()) && IsEnabled(plugin.Slug) && SemVer.Same(metadata?.Version, plugin.NewVersion) &&
                 global._contexts.FirstOrDefault(c => c.Slug == plugin.Slug)?.State != EEditorPluginState.Error;
         }
         public void Log(string message) => global._ePluginContext?.Logger.Log(message);

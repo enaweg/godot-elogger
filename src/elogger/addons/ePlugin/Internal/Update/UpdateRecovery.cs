@@ -45,21 +45,21 @@ internal static class UpdateRecovery
     private static readonly JsonSerializerOptions Options = new() { PropertyNameCaseInsensitive = true, WriteIndented = true };
     public static Outcome RunIfNeeded(string projectRoot, ILogger logger, Func<bool> rebuild, Action restoreSettings)
     {
-        var root = Path.Combine(projectRoot, ".godot/eplugin/updates");
+        var root = UpdatePaths.TransactionsOf(projectRoot);
         if (!Directory.Exists(root)) return Outcome.Continue;
         foreach (var folder in Directory.GetDirectories(root))
         {
-            var path = Path.Combine(folder, "journal.json");
+            var path = UpdatePaths.JournalIn(folder);
             if (!File.Exists(path)) continue;
             Guid? recoveringAttempt = null;
             try
             {
                 var json = JsonNode.Parse(File.ReadAllText(path)) as JsonObject ?? throw new InvalidDataException("Empty journal.");
-                if (json["plugins"] is not JsonArray plugins || !plugins.Any(p => p?["slug"]?.GetValue<string>() == "ePlugin")) continue;
+                if (json["plugins"] is not JsonArray plugins || !plugins.Any(p => p?["slug"]?.GetValue<string>() == Framework.Slug)) continue;
                 var journal = json.Deserialize<Journal>(Options) ?? throw new InvalidDataException("Empty journal.");
-                if (!journal.Plugins.Any(p => p.Slug == "ePlugin")) continue;
+                if (!journal.Plugins.Any(p => p.Slug == Framework.Slug)) continue;
                 if (journal.Schema != 1 || journal.AttemptId == Guid.Empty) throw new InvalidDataException("Unsupported recovery journal schema.");
-                if (journal.State is "Committed" or "RolledBack" or "Failed" or "Verified" || File.Exists(Path.Combine(folder, "healthy.marker"))) continue;
+                if (journal.State is "Committed" or "RolledBack" or "Failed" or "Verified" || File.Exists(Path.Combine(folder, UpdatePaths.HealthyMarker))) continue;
                 // Staged has not touched addon files. Normal recovery can abandon it.
                 if (journal.State == "Staged") continue;
                 json["startCount"] = ++journal.StartCount;
@@ -126,8 +126,7 @@ internal static class UpdateRecovery
                 }
                 if (!journal.KeepProjectFiles)
                 {
-                    foreach (var file in projectFiles) AddonFiles.Overwrite(Inside(projectBackup, file), Inside(projectRoot, file));
-                    if (!projectFiles.Any(f => f.Equals("nuget.config", StringComparison.OrdinalIgnoreCase))) AddonFiles.DeleteFile(Path.Combine(projectRoot, "nuget.config"));
+                    ProjectBackup.Restore(projectRoot, projectBackup, projectFiles, projectSettings: true);
                     json["keepProjectFiles"] = true; Write(path, json);
                     restoreSettings();
                 }
@@ -138,7 +137,7 @@ internal static class UpdateRecovery
                 Write(path, json);
                 try
                 {
-                    var cachePath = Path.Combine(projectRoot, ".godot/eplugin/update-state.json");
+                    var cachePath = UpdatePaths.CacheOf(projectRoot);
                     var cache = File.Exists(cachePath) ? JsonNode.Parse(File.ReadAllText(cachePath)) as JsonObject : null;
                     cache ??= new JsonObject { ["schema"] = 1 };
                     var failures = cache["failedUpdates"] as JsonObject;
@@ -163,7 +162,7 @@ internal static class UpdateRecovery
                     try
                     {
                         var store = new PluginStateStore(Path.Combine(projectRoot, "addons/eplugin-state.json"), logger);
-                        store.Load(); store.TryFail(attempt, PersistedPluginState.Failed, "update_rollback_failed");
+                        store.Load(); store.TryFail(attempt, PersistedPluginState.Failed, AttemptReasons.UpdateRollbackFailed);
                     }
                     catch (Exception) { /* Preserve backups even if the marker cannot be written. */ }
                 }
@@ -177,12 +176,8 @@ internal static class UpdateRecovery
     private static void RestoreSubmodule(string installed, IReadOnlyList<string> preserved, string commit)
     {
         var git = new GitRunner(allowFileProtocol: true);
-        foreach (var path in preserved.OrderByDescending(p => p.Length))
-        {
-            var full = Inside(installed, path);
-            if (Directory.Exists(full)) AddonFiles.DeleteTree(full);
-            else AddonFiles.DeleteFile(full);
-        }
+        // Old files the interim bridge kept are untracked in the new version, and would keep the old one from being checked out.
+        InterimBridge.Remove(installed, preserved);
         if (SubmoduleGit.Head(git, installed).Equals(commit, StringComparison.OrdinalIgnoreCase)) return;
         if (SubmoduleGit.Changes(git, installed) is { Count: > 0 } changes) throw new IOException(SubmoduleSource.LocalChanges(installed, changes).Message);
         SubmoduleGit.Checkout(git, installed, commit);
@@ -195,7 +190,7 @@ internal static class UpdateRecovery
         if (string.IsNullOrWhiteSpace(relative) || Path.IsPathRooted(relative) || relative.Split('/', '\\').Any(p => p is "" or "." or "..")) throw new InvalidDataException("Unsafe recovery path.");
         var prefix = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
         var path = Path.GetFullPath(Path.Combine(prefix, relative));
-        if (!path.StartsWith(prefix, StringComparison.Ordinal)) throw new InvalidDataException("Recovery path escapes its root.");
+        if (!path.StartsWith(prefix, PackageFiles.PathComparison)) throw new InvalidDataException("Recovery path escapes its root.");
         return path;
     }
     private static void Copy(string source, string target)
@@ -208,7 +203,12 @@ internal static class UpdateRecovery
             if (Directory.Exists(entry)) Copy(entry, to); else AddonFiles.Overwrite(entry, to);
         }
     }
-    private static bool HasVersion(string path, string version) => File.ReadLines(path).Any(line => line.Trim() == "version=\"" + version + "\"" || line.Trim() == "version = \"" + version + "\"");
+    // read like the applier reads it, so recovery does not refuse what the applier accepts
+    private static bool HasVersion(string path, string version)
+    {
+        try { return PluginIni.Parse(File.ReadAllText(path)).GetValueOrDefault("version") == version; }
+        catch (InvalidDataException) { return false; }
+    }
     private static void Visibility(string addon, string slug, string path, bool show)
     {
         var prefix = "res://addons/" + slug + "/";
@@ -223,36 +223,6 @@ internal static class UpdateRecovery
             File.SetAttributes(from, show ? FileAttributes.Normal : FileAttributes.Hidden);
             Directory.Move(from, to);
         }
-    }
-}
-
-/// <summary>
-/// The copy of the project files (<c>.csproj</c>, <c>.sln</c>, <c>nuget.config</c>, <c>project.godot</c>) a journal restores
-/// on rollback. Replacing it writes the new copy to <c>backup-project.new</c>, moves the old one to <c>.old</c> and the new
-/// one into place, and only then saves the journal. Used by both the applier and early recovery.
-/// </summary>
-internal static class ProjectBackup
-{
-    public const string Folder = "backup-project";
-
-    /// <summary>Whether a file in the project root is one of the project files the backup holds.</summary>
-    public static bool Includes(string fileName) =>
-        Path.GetExtension(fileName) is ".csproj" or ".sln" or ".slnx" || fileName.Equals("nuget.config", StringComparison.OrdinalIgnoreCase) || fileName == "project.godot";
-
-    /// <summary>
-    /// The folder to restore from and its files. When a replacement stopped between its two moves, the new copy is
-    /// complete (the old one is moved aside only after it) and is used; without the new copy, the old one is. The files
-    /// are those the folder holds: each copy is complete before it is moved into place, while the journal listing them is
-    /// saved only afterwards, so after an interruption it may still list the previous copy's (<paramref name="recorded"/>
-    /// is used only when the folder is missing).
-    /// </summary>
-    public static (string Directory, IReadOnlyList<string> Files) Find(string journalDirectory, IReadOnlyList<string> recorded)
-    {
-        var backup = Path.Combine(journalDirectory, Folder);
-        var directory = Directory.Exists(backup) || !Directory.Exists(backup + ".old") ? backup
-            : Directory.Exists(backup + ".new") ? backup + ".new" : backup + ".old";
-        if (!Directory.Exists(directory)) return (directory, recorded);
-        return (directory, Directory.GetFiles(directory).Select(f => Path.GetFileName(f)).Where(Includes).ToArray());
     }
 }
 #endif

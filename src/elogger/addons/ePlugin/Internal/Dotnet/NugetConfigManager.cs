@@ -276,7 +276,8 @@ internal static partial class NugetConfigManager
         var fullSourcePath = Path.GetFullPath(Path.Combine(root, isResource ? rawSource[projectScheme.Length..] : rawSource));
 
         var relative = Path.GetRelativePath(root, fullSourcePath);
-        if (relative.StartsWith("..", StringComparison.Ordinal) || Path.IsPathRooted(relative))
+        // ".." alone or followed by a separator leaves the project; a folder named "..feed" inside it does not
+        if (relative == ".." || relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal) || Path.IsPathRooted(relative))
         {
             // outside the project tree; cannot be represented portably.
             return null;
@@ -340,10 +341,10 @@ internal static partial class NugetConfigManager
         return new(XDocument.Parse(empty, LoadOptions.PreserveWhitespace), Environment.NewLine, false);
     }
 
-    /// <summary>The comment before an entry, skipping the line break between them.</summary>
     /// <summary>
-    /// The used-by comment ePlugin wrote before a managed entry; null when there is none, also when another comment is
-    /// there (e.g. one the team wrote after removing ePlugin's by hand), which is never changed or removed.
+    /// The used-by comment ePlugin wrote before a managed entry, skipping the line break between them; null when there is
+    /// none, also when another comment is there (e.g. one the team wrote after removing ePlugin's by hand), which is never
+    /// changed or removed.
     /// </summary>
     private static XComment? CommentBefore(XElement add)
     {

@@ -13,8 +13,7 @@ namespace Enaweg.Plugin.Internal;
 /// </summary>
 internal sealed partial class EGlobal
 {
-    internal bool IsChangingPlugins => _transition is not null || _toCheckEnable.Count > 0 ||
-        _toCheckDisable.Count > 0 || _transitionHold > 0;
+    internal bool IsChangingPlugins => _transition is not null || _coordinator.IsPending;
 
     private sealed class PluginTransition(Guid attemptId)
     {
@@ -68,7 +67,7 @@ internal sealed partial class EGlobal
             if (!_stateStore.TryAddParticipant(_transition.AttemptId, context.Slug, context.Metadata?.Version, target))
             {
                 context.State = EEditorPluginState.Error;
-                FailTransition("cannot_record_participant", RecordFailedDetail);
+                FailTransition(AttemptReasons.CannotRecordParticipant, RecordFailedDetail);
                 return false;
             }
 
@@ -85,22 +84,20 @@ internal sealed partial class EGlobal
             context.ErrorDetail ??= new InvalidOperationException(_stateStore.LoadProblem is { } problem
                 ? $"ePlugin cannot read {problem.File}: {problem.Message}"
                 : $"An earlier operation of {context.Slug} failed ({DescribeLocalState(context.Slug)}) and has to be retried or given up on first.");
-            FailTransition("participant_blocked");
+            FailTransition(AttemptReasons.ParticipantBlocked);
             return false;
         }
 
-        var version = context.Metadata?.Version;
-        if (string.IsNullOrWhiteSpace(version))
+        if (VersionOrRecordInvalid(_stateStore, context, manualRetry, target) is not { } version)
         {
             context.Logger?.Error(context.Metadata is null
                 ? $"Plugin {context.Slug}: {_host.PluginDirectory(context.Slug)}/plugin.cfg cannot be read. Repair it and use manual retry."
                 : $"Plugin {context.Slug} has no version in {_host.PluginDirectory(context.Slug)}/plugin.cfg. Add one (e.g. version=\"1.0.0\") and use manual retry.");
-            _stateStore.TryRecordInvalid(context.Slug, version, "invalid_plugin_version", manualRetry, target);
             context.State = EEditorPluginState.Error;
             context.ErrorDetail = new InvalidOperationException(context.Metadata is null
                 ? $"{_host.PluginDirectory(context.Slug)}/plugin.cfg cannot be read."
                 : $"{_host.PluginDirectory(context.Slug)}/plugin.cfg has no version. Add one, e.g. version=\"1.0.0\".");
-            FailTransition("invalid_plugin_version");
+            FailTransition(AttemptReasons.InvalidPluginVersion);
             return false;
         }
 
@@ -120,7 +117,7 @@ internal sealed partial class EGlobal
         else if (!_stateStore.TryAddParticipant(_transition.AttemptId, context.Slug, version, target))
         {
             context.State = EEditorPluginState.Error;
-            FailTransition("cannot_record_participant", RecordFailedDetail);
+            FailTransition(AttemptReasons.CannotRecordParticipant, RecordFailedDetail);
             return false;
         }
 
@@ -143,7 +140,7 @@ internal sealed partial class EGlobal
         {
             _recipeUpdateJournal.Failure = reason;
             _recipeUpdateJournal.Save();
-            _toCheckEnable.Clear(); _toCheckDisable.Clear();
+            _coordinator.ClearWaiting();
             return;
         }
         if (_transition is null)
@@ -169,8 +166,7 @@ internal sealed partial class EGlobal
             .ToDictionary(g => g.Key, g => g.Last().ErrorDetail!.Message, StringComparer.Ordinal);
         _stateStore?.TryFail(_transition.AttemptId, PersistedPluginState.Failed, reason, details, log);
 
-        _toCheckEnable.Clear();
-        _toCheckDisable.Clear();
+        _coordinator.ClearWaiting();
         _transition = null;
         _transitionFailed = true;
     }
@@ -238,10 +234,6 @@ internal sealed partial class EGlobal
     /// </summary>
     internal const ulong StallFrames = 30;
 
-    private string? _stallSignature;
-    private DateTime _stallSince;
-    private ulong _stallFrame;
-
     /// <summary>
     /// The watchdog of plugin operations, called every frame: one that made no progress for <see cref="StallTimeout"/>
     /// and <see cref="StallFrames"/>, e.g. a plugin waiting for a dependency that never activates, fails. Otherwise it
@@ -254,35 +246,26 @@ internal sealed partial class EGlobal
     /// <param name="frame">The editor's frame count, <c>Engine.GetProcessFrames()</c>.</param>
     internal bool CheckStalledTransition(DateTime now, ulong frame, bool paused = false)
     {
-        if (!IsValid() || !IsChangingPlugins || paused || _transitionHold > 0 || _pendingLicenseReview is not null ||
+        if (!IsValid() || !IsChangingPlugins || paused || _coordinator.IsHeld || _pendingLicenseReview is not null ||
             _recipeUpdateJournal is not null || _updateRefreshSuppression > 0)
         {
-            _stallSignature = null;
+            _coordinator.Watchdog.Reset();
             return false;
         }
 
-        var signature = TransitionSignature();
-        if (signature != _stallSignature)
-        {
-            _stallSignature = signature;
-            _stallSince = now;
-            _stallFrame = frame;
-            return false;
-        }
-
-        if (now - _stallSince < StallTimeout || frame - _stallFrame < StallFrames)
+        if (!_coordinator.Watchdog.IsStalled(TransitionSignature(), now, frame))
         {
             return false;
         }
 
-        // These read files, so only once the time is up; the next attempt counts the whole timeout again.
-        if (AssemblyReload.IsPending || _updateJournals?.Read().Any(j => j.IsActive) == true)
+        // The next attempt counts the whole timeout again.
+        _coordinator.Watchdog.Reset();
+        // These read files, so only once the time is up.
+        if (_host.IsAssemblyReloadPending || IsUpdateActive)
         {
-            _stallSignature = null;
             return false;
         }
 
-        _stallSignature = null;
         FailStalledTransition();
         return true;
     }
@@ -291,16 +274,16 @@ internal sealed partial class EGlobal
     private string TransitionSignature() => string.Join("|",
         _transition?.AttemptId.ToString() ?? "-",
         string.Join(",", _transition?.Participants.Select(p => $"{p.Key.Slug}:{p.Key.State}:{p.Value}") ?? []),
-        string.Join(",", _toCheckEnable.Select(c => $"{c.Slug}:{c.State}")),
-        string.Join(",", _toCheckDisable.Select(c => c.Slug)));
+        string.Join(",", _coordinator.Activations.Select(c => $"{c.Slug}:{c.State}")),
+        string.Join(",", _coordinator.Deactivations.Select(c => c.Slug)));
 
     private void FailStalledTransition()
     {
         var seconds = (int)StallTimeout.TotalSeconds;
-        if (_toCheckEnable.Count > 0)
+        if (!_coordinator.Activations.IsEmpty)
         {
             // what the chain waits for: dependencies that are enabled, but neither activated nor waiting themselves
-            var waiting = _toCheckEnable.ToHashSet();
+            var waiting = _coordinator.Activations.ToHashSet();
             var stalled = waiting.Where(c => c.IsRecipeCreated)
                 .SelectMany(c => c.Builder.PluginRecipe.PluginDependencies)
                 .Select(d => d.Slug).Distinct(StringComparer.Ordinal)
@@ -310,17 +293,26 @@ internal sealed partial class EGlobal
             var reason = $"Plugin dependency {names} did not activate within {seconds} s: its _EnablePlugin may not call " +
                          $"this.EnableEPlugin(). Report it to the author of {names}, then retry.";
             _ePluginContext?.Logger.Error($"{string.Join(", ", waiting.Select(c => c.Slug).Distinct(StringComparer.Ordinal))} stopped waiting: {reason}");
-            FailWaitingPlugins(reason, "dependency_timed_out");
+            FailWaitingPlugins(reason, AttemptReasons.DependencyTimedOut);
             return;
         }
 
         // nothing waits for a dependency, but a participant never completed its callback
         var detail = $"The plugin operation made no progress for {seconds} s.";
         _ePluginContext?.Logger.Error($"{detail} It is given up on; retry it under Needs attention in the ePlugin Manager.");
-        FailTransition("operation_timed_out", detail);
+        FailTransition(AttemptReasons.OperationTimedOut, detail);
         // also without a transition to fail, e.g. a deactivation that never joined one
-        _toCheckDisable.Clear();
-        RefreshEditor(rebuild: false);
+        _coordinator.Deactivations.Clear();
+        RefreshEditor();
+    }
+
+    /// <summary>Finishes the transition (<see cref="FinishTransition"/>) and refreshes the editor once it completed.</summary>
+    private void CompleteTransition()
+    {
+        if (FinishTransition())
+        {
+            RefreshEditor();
+        }
     }
 
     internal bool FinishTransition()
@@ -331,7 +323,7 @@ internal sealed partial class EGlobal
             return !_transitionFailed;
         }
 
-        if (_toCheckEnable.Count > 0 || _toCheckDisable.Count > 0 || _transitionHold > 0)
+        if (_coordinator.IsPending)
         {
             return false;
         }
@@ -339,7 +331,7 @@ internal sealed partial class EGlobal
         var transition = _transition;
         if (transition.Participants.Any(x => x.Key.State == EEditorPluginState.Error))
         {
-            FailTransition("recipe_operation_failed");
+            FailTransition(AttemptReasons.RecipeOperationFailed);
             return false;
         }
 
@@ -358,7 +350,7 @@ internal sealed partial class EGlobal
             if (build is not { ExitCode: 0 })
             {
                 var output = build?.Output ?? ["The dotnet CLI is unavailable."];
-                FailTransition("solution_build_failed", BuildFailureDetail(build?.ExitCode ?? -1, output),
+                FailTransition(AttemptReasons.SolutionBuildFailed, BuildFailureDetail(build?.ExitCode ?? -1, output),
                     WriteBuildLog(transition.AttemptId, output));
                 return false;
             }
@@ -370,7 +362,7 @@ internal sealed partial class EGlobal
                 x.Value)).ToArray();
         if (_stateStore?.TryComplete(transition.AttemptId, completed) == false)
         {
-            FailTransition("state_commit_failed", $"Saving the result in {StateFilePath} failed. The Output panel shows why; check that the file is writable and has no merge conflict.");
+            FailTransition(AttemptReasons.StateCommitFailed, $"Saving the result in {StateFilePath} failed. The Output panel shows why; check that the file is writable and has no merge conflict.");
             return false;
         }
 
