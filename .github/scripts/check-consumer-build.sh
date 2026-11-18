@@ -65,10 +65,11 @@ EOF
   # Installed: only ELoggerPlugin.cs is visible, and it must compile with nothing but Godot and ePlugin.
   build_all "$project" "installed"
 
-  # Enabled: what ePlugin does for ELoggerPlugin.CreateRecipe. Keep this in sync with the recipe. Like the recipe,
-  # take the latest package versions, so a breaking ZLogger or ZString release shows up here first.
+  # Enabled: what ePlugin does for ELoggerPlugin.CreateRecipe. Keep this in sync with the recipe: ZLogger at the
+  # recipe's floating version (ELoggerPlugin.ZLoggerVersion), so its newest patch release is built here first, and
+  # ZString at its latest version, so a breaking ZString release shows up here first.
   mv "$project/addons/eLogger/.src" "$project/addons/eLogger/src"
-  dotnet add "$project/Consumer.csproj" package ZLogger
+  dotnet add "$project/Consumer.csproj" package ZLogger --version "2.6.*"
   dotnet add "$project/Consumer.csproj" package ZString
   build_all "$project" "enabled"
 done
