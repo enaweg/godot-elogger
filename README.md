@@ -13,7 +13,7 @@
 ![Dotnet 8](https://img.shields.io/badge/8-02020?logo=dotnet&logoSize=auto&logoColor=purple&color=darkgreen&labelColor=E0E0E0)
 ![Dotnet 10](https://img.shields.io/badge/10-02020?logo=dotnet&logoSize=auto&logoColor=purple&color=darkgreen&labelColor=E0E0E0)
 
-![ZLogger 2.5](https://img.shields.io/badge/ZLogger-v2.6-202020?color=darkgreen&labelColor=202020)
+![ZLogger 2.6](https://img.shields.io/badge/ZLogger-v2.6-202020?color=darkgreen&labelColor=202020)
 
 **NOTE**: This project is experimental and still a work in progress.
 
@@ -63,9 +63,13 @@ The current CI-tested configuration uses:
 
 + [Godot 4.7.2 .NET](https://godotengine.org/download/archive/4.7.2-stable/)
 + [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)
++ [ZLogger 2.6.2](https://www.nuget.org/packages/ZLogger/2.6.2) and [ZString 2.6.0](https://www.nuget.org/packages/ZString/2.6.0)
 
 The project targets `net8.0`. Godot **4.5** is the minimum supported version: engine message interception
 subclasses `Godot.Logger`, which was first exposed to scripting in 4.5.
+
+Enabling the plugin pins `ZLogger` and `ZString` to `2.6.*`, so a project gets their newest 2.6.x patch releases but
+not a new minor or major release eLogger has not been tested against.
 
 ## Installation
 
@@ -73,7 +77,7 @@ subclasses `Godot.Logger`, which was first exposed to scripting in 4.5.
 2. Extract `addons/eLogger` and `addons/ePlugin` into your Godot project's `addons` directory. eLogger depends on ePlugin.
 3. Open the project in the Godot .NET editor and enable **ePlugin** and **eLogger** under **Project > Project Settings > Plugins**.
 
-Enabling eLogger adds the required `ZLogger` and `ZString` NuGet packages to the project and exposes the plugin's runtime source directory. No manual `dotnet add package` command is needed. A welcome page with first steps is shown once after eLogger is enabled, and new eLogger releases are offered in the ePlugin Manager.
+Enabling eLogger adds the required `ZLogger` and `ZString` NuGet packages, both pinned to `2.6.*`, to the project and exposes the plugin's runtime source directory. No manual `dotnet add package` command is needed. A welcome page with first steps is shown once after eLogger is enabled, and new eLogger releases are offered in the ePlugin Manager.
 
 Disabling eLogger removes the packages again and hides its runtime source directory, so game code that uses eLogger no longer compiles until the plugin is enabled again.
 
