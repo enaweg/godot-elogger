@@ -68,8 +68,8 @@ The current CI-tested configuration uses:
 The project targets `net8.0`. Godot **4.5** is the minimum supported version: engine message interception
 subclasses `Godot.Logger`, which was first exposed to scripting in 4.5.
 
-Enabling the plugin adds the latest `ZLogger` and `ZString` releases from NuGet, so a project can end up on a
-newer version than the one listed here.
+Enabling the plugin pins `ZLogger` to `2.6.*`, so a project gets the newest 2.6.x patch release but not a new minor
+or major release eLogger has not been tested against. `ZString` is added at its latest release.
 
 ## Installation
 
@@ -77,7 +77,7 @@ newer version than the one listed here.
 2. Extract `addons/eLogger` and `addons/ePlugin` into your Godot project's `addons` directory. eLogger depends on ePlugin.
 3. Open the project in the Godot .NET editor and enable **ePlugin** and **eLogger** under **Project > Project Settings > Plugins**.
 
-Enabling eLogger adds the required `ZLogger` and `ZString` NuGet packages to the project and exposes the plugin's runtime source directory. No manual `dotnet add package` command is needed. A welcome page with first steps is shown once after eLogger is enabled, and new eLogger releases are offered in the ePlugin Manager.
+Enabling eLogger adds the required `ZLogger` (pinned to `2.6.*`) and `ZString` NuGet packages to the project and exposes the plugin's runtime source directory. No manual `dotnet add package` command is needed. A welcome page with first steps is shown once after eLogger is enabled, and new eLogger releases are offered in the ePlugin Manager.
 
 Disabling eLogger removes the packages again and hides its runtime source directory, so game code that uses eLogger no longer compiles until the plugin is enabled again.
 
